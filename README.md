@@ -1,0 +1,68 @@
+# dsh-market
+
+[DeepSeek Harness](https://github.com/deepseek-ai/deepseek-harness)（下称 dsh）的第三方插件：**插件市场**。在侧边栏提供一个面板，浏览与搜索 npm 上的 dsh 插件、看详情、装进当前 profile、管理已安装的插件。
+
+> 目录里出现或显示为可安装，不代表经过安全审核或推荐。插件装上之后是以你的用户权限运行的本地代码。
+
+## 功能
+
+侧边栏底部一个按钮（终端之上），点开是个面板，两个页签：
+
+- **已安装**：分两组显示 —— 随桌面版分发的插件（可开关，不可卸载）与从 profile 装的插件（可卸载）。开关改动重启后生效。
+- **发现**：搜 npm，可按相关度 / 周下载量 / 最近更新排序，点开任意一条看详情（截图、关键词、协议、依赖数、仓库），一键安装。
+
+| 路由 | 作用 |
+|---|---|
+| `GET /search` | 搜 npm（默认限定 `keywords:dsh-plugin`，`all=1` 搜全站），带周下载量与排序 |
+| `GET /detail` | 取 `latest` manifest，判断能不能装，附预览图清单 |
+| `GET /installed` | 读当前 profile 的直接依赖 |
+| `GET /capabilities` | 这个环境能不能一键安装 |
+| `GET /image` | 预览图代理（见下） |
+| `POST /install` | 装一个包到当前 profile |
+| `POST /uninstall` | 从当前 profile 卸载一个包 |
+
+## 配置
+
+| 键 | 默认 | 说明 |
+|---|---|---|
+| `imageMirror` | `""`（关） | GitHub 镜像前缀，用于取预览图。见下面「预览图」一节。 |
+
+设置存在 profile 目录下的 `dsh-market.json`，**面板里直接改、立刻生效、不用重启**。cordis 的 `Config` 仍然保留作为默认值（声明式部署可以在 patch 里钉死它），但**不要指望设置页会为它生成表单** —— dsh 的插件列表 tab 里那个 "Configuration" 只是个状态文字，不是输入框（查证过）。这就是为什么设置要落在自己的文件里而不是只放 Config。
+
+## 预览图
+
+图片链接从 npm packument 里的 README 抽出来（markdown 与内嵌 HTML 两种写法都认），过滤掉 shields.io 那类徽章，相对路径按仓库还原。
+
+**图片一律经本插件代理，浏览器不直连任何第三方主机。** README 是插件作者可控的内容，直连意味着他能指挥用户的机器去访问任意地址，并借此知道「谁、什么时候、在看哪个插件」。代理这一跳把出网限制在内核进程里，主机受白名单约束、体积受上限约束，并且只放行 `content-type: image/*` 的响应。
+
+取图按候选顺序尝试：
+
+1. `cdn.jsdelivr.net/npm/<pkg>@<ver>/<path>` —— 只有截图真的打进了 npm 包（在 `files` 里）才有。实测多数插件把截图放在 `docs/`，而 `docs/` 通常不发布，所以这条经常 404。
+2. `raw.githubusercontent.com/<owner>/<repo>/HEAD/<path>` —— 权威来源，但**在国内与不少企业网络下直接超时**。
+3. 配了 `imageMirror` 时，再试一次镜像（`<mirror>/<原始地址>`）。
+
+所以：**网络不受限时开箱就有图**。受限网络下（国内、企业网）一张都取不到时，详情里会就地出现一句「预览图加载不出来 —— 你的网络可能访问不了 GitHub」加一个「启用镜像重试」按钮，点一下就写好设置并重新加载。默认不开，因为镜像是我们不控制的第三方服务，会知道你在看哪些插件的截图 —— 这个取舍该由用户在需要时自己做，而不是我们默认替他决定。
+
+一键启用用的默认镜像是 `https://gh-proxy.com/`（实测可用）。想换别的，改 profile 里的 `dsh-market.json`。
+
+## 设计要点
+
+**为什么用 npm 而不是 GitHub 做检索主干。** npm 的搜索结果一次就带齐了列表要用的字段（描述、关键词、仓库链接、发布者、协议、时间），而且**给出的就是可安装的身份**——包名加版本，装的时候直接用。GitHub 检索给不出可安装身份，未认证限流还只有 60 次/小时（搜索 10 次/分钟、按 IP 共享）。GitHub 只在详情里做补充展示。
+
+**「能装」的唯一硬条件是 manifest 里声明了 `dsh.bundle.patch`。** 没有它，`dsh plugin add` 会把包装进 dependencies、打一句 warning、然后永远不激活——用户点了「安装」却什么都没发生，这是最糟的一种「成功」。来源方声明的版本、验证徽章、仓库是否一致这些都不作为资格条件：可伪造，或者会误杀合法插件。
+
+**版本必须钉死。** 安装时用详情里拿到的精确版本号，不写 `^x.y.z` 范围。范围意味着期望状态不确定，pnpm 某次 install 就可能悄悄漂到新版本。
+
+**这个插件自己就是它所推荐的那条安装路径的第一个住户**：装进 `$DSH_HOME/profiles/<name>/`，由 `dsh.bundle.patch` 激活，不随内核热更新与应用升级消失。profile 目录靠 `ctx.baseUrl` 定位（dsh 把 loader 的 include root 锚在 profile 目录上），所以不依赖任何宿主注入的环境变量，装在任何 dsh 里都能用。
+
+**entry id 是 `dsdesktop-market` 而不是 `dsh-market`。** npm 上已有的 `dshmarket` 插件占用了后者，`- insert:` 不去重，两个都装上就是 `duplicate loader entry id`，内核直接退出。
+
+## 安全边界
+
+- 只出网到 `registry.npmjs.org` 与 `api.github.com`，只允许 https，不带任何凭据。
+- 所有路由过统一的 Origin + Content-Type 检查（本服务从不发 CORS 头，但那只挡读取、不挡发送）。
+- 包名在进入任何 URL 或命令行之前先过 `isValidPackageName`：小写、可带一层 scope、不以 `.` `_` `-` 开头。**禁掉 `-` 开头**是我们额外加的一条——`-g`、`--force` 整串都由合法包名字符组成，能通过 npm 自己的校验，然后被 pnpm 当作参数而不是包名吃掉。
+
+## 许可证
+
+[MIT](LICENSE)
