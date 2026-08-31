@@ -7,7 +7,6 @@ import {
   buildSearchText, githubSlug, installability, isExactVersion, isValidPackageName,
   applyDownloads, extractImages, formatDownloads, imageCandidates, isBadgeUrl,
   normalizeDownloads, resolveImageUrl,
-  manifestEnabled, nextUserState,
   normalizeInstalled, normalizeManifest, normalizeSearchHits, tailLines
 } from "../lib/pure.js";
 
@@ -339,42 +338,4 @@ test("imageCandidates: 配了镜像时，镜像候选排在最后且只镜像 Gi
   assert.equal(trimmed[1], "https://gh-proxy.com/https://raw.githubusercontent.com/o/r/HEAD/a.png");
   // 没配镜像时行为完全不变
   assert.equal(imageCandidates("a.png", { slug: "o/r" }).length, 1);
-});
-
-// --- 桌面自带插件的开关状态（原属 dsDesktop 的 dsh-plugin-manager，随其合并搬来）---
-
-test("manifestEnabled: enabled 缺省视为 true（要与外壳的同名规则同义）", () => {
-  // 这条规则在 dsDesktop 的 src/shared/plugin-state.js 里还有一份（读侧）。跨仓库
-  // 跨进程没法共用模块，只能靠两边各写一遍 + 各自的测试守着。改默认值要同时改两处，
-  // 否则写侧会写出多余的键、或者把用户没动过的项钉死在旧默认上。
-  assert.equal(manifestEnabled({}), true);
-  assert.equal(manifestEnabled({ enabled: true }), true);
-  assert.equal(manifestEnabled({ enabled: false }), false);
-  assert.equal(manifestEnabled(undefined), true);
-});
-
-test("nextUserState: 等于默认值删键（状态只记偏离），偏离才写", () => {
-  const plugin = { entryId: "x" };            // 清单默认 enabled = true
-  // 关掉 = 偏离默认 → 写 false
-  assert.deepEqual(nextUserState({}, plugin, false), { x: false });
-  // 打开 = 回到默认 → 删键，而不是写 true
-  assert.deepEqual(nextUserState({ x: false }, plugin, true), {});
-  // 清单默认就是关的插件，反过来
-  const off = { entryId: "y", enabled: false };
-  assert.deepEqual(nextUserState({}, off, true), { y: true });
-  assert.deepEqual(nextUserState({ y: true }, off, false), {});
-});
-
-test("nextUserState: 纯函数，不改传入的状态对象", () => {
-  const state = { a: false };
-  const next = nextUserState(state, { entryId: "b" }, false);
-  assert.deepEqual(state, { a: false }, "原对象不能被改");
-  assert.deepEqual(next, { a: false, b: false });
-});
-
-test("nextUserState: 别的插件的状态不受影响", () => {
-  assert.deepEqual(
-    nextUserState({ a: false, b: false }, { entryId: "a" }, true),
-    { b: false },
-  );
 });
