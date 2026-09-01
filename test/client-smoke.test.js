@@ -389,6 +389,15 @@ test('已安装的插件有新版本时要给徽章和更新按钮，点了要�
     // 光断言「点了不抛」抓不住 onClick 接错回调、变成空操作这类问题——必须确认
     // 它真的把请求打到了 /install（用最新版本重装等同于更新，见后端 handleInstall）。
     assert.ok(mod.__fetchCalls.includes('/api/dsdesktop/market/install POST'), '点更新按钮应该调用 /install');
+
+    // 更新成功后不该在这张卡片的结果条里单独画一个「重启应用」按钮——重启入口
+    // 和停用/启用共用面板底部那一条（dsmkPending），点更新只是把那条横幅点亮。
+    const after = flatten(await mod.__render(render));
+    const restartButtons = after.filter((n) => n.type === 'button')
+      .filter((b) => (JSON.stringify(b.props.children ?? null) ?? '').includes('market.detail.restart'));
+    assert.strictEqual(restartButtons.length, 1, '重启按钮应该只出现一次（共用横幅里），不该每张卡片各配一个');
+    const afterTexts = after.map((n) => JSON.stringify((n.props && n.props.children) ?? null) ?? '');
+    assert.ok(afterTexts.some((x) => x.includes('market.pending.restart')), '更新成功后应该点亮共用的「重启后生效」横幅');
   } finally {
     cleanup();
   }
