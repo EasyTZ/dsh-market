@@ -1,6 +1,6 @@
 {
   "name": "@easytz/dsh-market",
-  "version": "1.0.0",
+  "version": "1.0.1",
   "description": "Plugin market for DeepSeek Harness: browse npm, inspect details, install into the current profile",
   "type": "module",
   "main": "lib/index.js",

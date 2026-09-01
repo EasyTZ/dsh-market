@@ -104,29 +104,47 @@ function loadModule() {
     localStorage: { getItem: () => null, setItem() {} },
     // 按路由给出**真实形状**的数据。给统一的空 `{}` 等于让列表永远是空的，
     // 分组那棵树照样不执行 —— 和 effect 不跑是同一种自欺。
-    fetch: async (url, init) => ({
-      ok: true,
-      json: async () => {
-        fetchCalls.push(String(url) + (init && init.method === 'POST' ? ' POST' : ''));
-        if (String(url).endsWith('/installed')) {
-          return { ok: true, data: { profileName: 'web', profileDir: 'D:/x/profiles/web', safeMode: false, items: [
-            // 不可卸载的（市场自己）、可卸载的、被停用的，三种行各来一个。
-            { name: '@easytz/dsh-market', version: '0.1.0', removable: false, canDisable: false, entryIds: ['dsdesktop-market'], enabled: true },
-            // 带一个「有更新」的，好让更新徽章/按钮那条路径也真的跑一遍。
-            { name: '@easytz/dsh-git', version: '0.5.0', removable: true, canDisable: true, entryIds: ['dsdesktop-git'], enabled: true, installedVersion: '0.5.0', latestVersion: '0.6.0', updateAvailable: true },
-            { name: 'cost-meter', version: '1.0.0', removable: true, canDisable: true, entryIds: ['cost-meter'], enabled: false },
-          ] } };
-        }
-        if (String(url).endsWith('/capabilities')) {
-          return { ok: true, data: { canInstall: true, busy: false, imageMirror: '' } };
-        }
-        if (String(url).endsWith('/bundled')) {
-          // 一个「随应用分发但当前没装」的，好让那一组也渲染出来。
-          return { ok: true, data: { plugins: [{ packageName: '@easytz/dsh-ui-balance', version: '0.5.0', installed: false }] } };
-        }
-        return { ok: true, data: { items: [], objects: [], total: 0 } };
-      },
-    }),
+    //
+    // `/installed` 的 enabled 字段要能被 toggle 的 POST 真正改掉，不能是每次都
+    // 返回同一份静态快照——真实后端的 /installed 读的就是 toggle 写的那份
+    // plugin-state.json，两者是同一份数据；测试的假 fetch 也要维持这个关系，
+    // 否则"改动是否真的生效"这条路径永远测不出来（改前改后请求都拿到一样的
+    // enabled，任何靠比对前后差异判断的逻辑都会被这份假数据本身骗过去）。
+    fetch: (() => {
+      const enabledOverrides = {};
+      return async (url, init) => ({
+        ok: true,
+        json: async () => {
+          fetchCalls.push(String(url) + (init && init.method === 'POST' ? ' POST' : ''));
+          if (String(url).endsWith('/profile-plugins/toggle')) {
+            const body = JSON.parse(init.body);
+            enabledOverrides[body.name] = body.enabled;
+            return { ok: true, data: { name: body.name, enabled: body.enabled, entryIds: [] } };
+          }
+          if (String(url).endsWith('/installed')) {
+            const fixture = [
+              // 不可卸载的（市场自己）、可卸载的、被停用的，三种行各来一个。
+              { name: '@easytz/dsh-market', version: '0.1.0', removable: false, canDisable: false, entryIds: ['dsdesktop-market'], enabled: true },
+              // 带一个「有更新」的，好让更新徽章/按钮那条路径也真的跑一遍。
+              { name: '@easytz/dsh-git', version: '0.5.0', removable: true, canDisable: true, entryIds: ['dsdesktop-git'], enabled: true, installedVersion: '0.5.0', latestVersion: '0.6.0', updateAvailable: true },
+              { name: 'cost-meter', version: '1.0.0', removable: true, canDisable: true, entryIds: ['cost-meter'], enabled: false },
+            ];
+            const items = fixture.map((item) => (
+              item.name in enabledOverrides ? { ...item, enabled: enabledOverrides[item.name] } : item
+            ));
+            return { ok: true, data: { profileName: 'web', profileDir: 'D:/x/profiles/web', safeMode: false, items } };
+          }
+          if (String(url).endsWith('/capabilities')) {
+            return { ok: true, data: { canInstall: true, busy: false, imageMirror: '' } };
+          }
+          if (String(url).endsWith('/bundled')) {
+            // 一个「随应用分发但当前没装」的，好让那一组也渲染出来。
+            return { ok: true, data: { plugins: [{ packageName: '@easytz/dsh-ui-balance', version: '0.5.0', installed: false }] } };
+          }
+          return { ok: true, data: { items: [], objects: [], total: 0 } };
+        },
+      });
+    })(),
   });
 
   const reactJsx = {
@@ -312,6 +330,39 @@ test('停用插件之后，横幅上要给一个重启按钮（改动要下次�
     const restart = after.filter((n) => n.type === 'button')
       .some((b) => (JSON.stringify(b.props.children ?? null) ?? '').includes('market.detail.restart'));
     assert.ok(restart, '横幅里应有「重启应用」按钮');
+  } finally {
+    cleanup();
+  }
+});
+
+test('一个插件先关再开，跟内核当前状态相比没有净改动，不该出现横幅', async () => {
+  try {
+    const { mod, captured, injected, t } = mount();
+    const panel = captured['shell.overlay:market-panel'];
+    const { store } = injected['market-panel'];
+    store.toggle();
+
+    const render = () => panel({ t, store });
+    const findToggle = (tree) => tree.find((n) => n.type === 'input' && n.props.type === 'checkbox' && typeof n.props.onChange === 'function');
+
+    const first = findToggle(flatten(await mod.__render(render)));
+    assert.ok(first, '可停用的行上应有开关');
+    // 关掉
+    first.props.onChange({ target: { checked: false }, preventDefault() {}, stopPropagation() {} });
+    const afterOff = flatten(await mod.__render(render));
+    assert.ok(
+      afterOff.map((n) => JSON.stringify((n.props && n.props.children) ?? null) ?? '').some((x) => x.includes('market.toggle.pending')),
+      '关掉之后应该先出现横幅——这是下一步的前提'
+    );
+
+    // 再开回去：跟内核实际在跑的状态（一开始就是启用）相比，等于没有净改动。
+    const second = findToggle(afterOff);
+    assert.ok(second, '重新渲染后开关还应该在');
+    second.props.onChange({ target: { checked: true }, preventDefault() {}, stopPropagation() {} });
+    const afterOn = flatten(await mod.__render(render));
+
+    const texts = afterOn.map((n) => JSON.stringify((n.props && n.props.children) ?? null) ?? '');
+    assert.ok(!texts.some((x) => x.includes('market.toggle.pending')), '关了又开等于没变，不该再显示「重启后生效」横幅');
   } finally {
     cleanup();
   }
