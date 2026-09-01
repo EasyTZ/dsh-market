@@ -123,8 +123,11 @@ function loadModule() {
           }
           if (String(url).endsWith('/installed')) {
             const fixture = [
-              // 不可卸载的（市场自己）、可卸载的、被停用的，三种行各来一个。
-              { name: '@easytz/dsh-market', version: '0.1.0', removable: false, canDisable: false, entryIds: ['dsdesktop-market'], enabled: true },
+              // 不可卸载的（宿主产品包）、可卸载的、被停用的，三种行各来一个。市场自己
+              // 不再是「不可卸载」的例子——它现在和别的插件一样能卸载，只是不能停用
+              // （见 lib/index.js 里 protectedPackages() / disableProtectedPackages()
+              // 的区分），这里换成真正不可卸载的宿主产品包，别再暗示市场卸不掉。
+              { name: '@deepseek-ai/dsh-base', version: '0.1.0', removable: false, canDisable: false, entryIds: [], enabled: true },
               // 带一个「有更新」的，好让更新徽章/按钮那条路径也真的跑一遍。
               { name: '@easytz/dsh-git', version: '0.5.0', removable: true, canDisable: true, entryIds: ['dsdesktop-git'], enabled: true, installedVersion: '0.5.0', latestVersion: '0.6.0', updateAvailable: true },
               { name: 'cost-meter', version: '1.0.0', removable: true, canDisable: true, entryIds: ['cost-meter'], enabled: false },
@@ -294,7 +297,7 @@ test('client.js 冒烟：打开的面板要真的渲染到有插件行', async (
     // **这条断言是这个测试的重点**：光「没抛异常」不够 —— 早退分支（还在 loading）
     // 也不抛。必须确认真的渲染到了那三行插件，否则测试覆盖的还是个空壳。
     const text = JSON.stringify(tree.map((n) => n.props && n.props.children));
-    for (const name of ['@easytz/dsh-market', '@easytz/dsh-git', 'cost-meter']) {
+    for (const name of ['@deepseek-ai/dsh-base', '@easytz/dsh-git', 'cost-meter']) {
       assert.ok(text.includes(name), `已安装列表里应渲染出 ${name}`);
     }
 
@@ -444,10 +447,10 @@ test('__test__ 导出的行级组件能单独渲染（列表项是最常改的�
     const { InstalledRow, DiscoverRow } = mod.__test__;
     const t = (k) => k;
 
-    // 不可卸载的那种（市场自己）：不该出现卸载按钮。
+    // 不可卸载的那种（宿主产品包）：不该出现卸载按钮。
     const builtin = flatten(InstalledRow({
       t, busy: null, action: null, canInstall: true,
-      item: { name: '@easytz/dsh-market', version: '0.1.0', removable: false, canDisable: false, entryIds: [], enabled: true },
+      item: { name: '@deepseek-ai/dsh-base', version: '0.1.0', removable: false, canDisable: false, entryIds: [], enabled: true },
       onUninstall() {}, onToggle() {},
     }));
     const labels = builtin.filter((n) => n.type === 'button').map((b) => JSON.stringify(b.props.children));
@@ -460,6 +463,19 @@ test('__test__ 导出的行级组件能单独渲染（列表项是最常改的�
       onUninstall() {}, onToggle() {},
     }));
     assert.ok(normal.some((n) => n.type === 'button'), '可卸载插件应有按钮');
+
+    // 市场自己现在是这种独特组合：能卸载（removable: true），但不能停用
+    // （canDisable: false）——见 lib/index.js 里卸载/停用两份保护名单为什么
+    // 不一样。客户端只认这两个字段，不认包名，所以这里直接给这个组合，
+    // 断言卸载按钮在、开关不在，两条都要卡住，任一条退化回旧行为都要报红。
+    const marketSelf = flatten(InstalledRow({
+      t, busy: null, action: null, canInstall: true,
+      item: { name: '@easytz/dsh-market', version: '1.0.3', removable: true, canDisable: false, entryIds: ['dsdesktop-market'], enabled: true },
+      onUninstall() {}, onToggle() {},
+    }));
+    const marketLabels = marketSelf.filter((n) => n.type === 'button').map((b) => JSON.stringify(b.props.children));
+    assert.ok(marketLabels.some((l) => l.includes('uninstall')), '市场自己现在应该有卸载按钮');
+    assert.ok(!marketSelf.some((n) => n.type === 'input' && n.props.type === 'checkbox'), '市场自己不该有停用开关');
 
     // 展开态才是真正复杂的那条路（详情、截图、安装按钮全在里面），两态都跑一遍。
     for (const expanded of [false, true]) {
