@@ -83,6 +83,9 @@ function loadModule() {
   const src = fs.readFileSync(CLIENT, 'utf8');
   const registrations = [];
   const styleTag = { dataset: {}, textContent: '' };
+  // 记下每次 fetch 打了哪条路由，供测试断言「点了这个按钮真的发出了那个请求」——
+  // 光断言「调用处理器不抛」抓不住「处理器把回调接错、变成空操作」这类问题。
+  const fetchCalls = [];
   Object.assign(globalThis, {
     window: {
       __ModuleLoader__: { load(reg) { registrations.push(reg); } },
@@ -101,14 +104,16 @@ function loadModule() {
     localStorage: { getItem: () => null, setItem() {} },
     // 按路由给出**真实形状**的数据。给统一的空 `{}` 等于让列表永远是空的，
     // 分组那棵树照样不执行 —— 和 effect 不跑是同一种自欺。
-    fetch: async (url) => ({
+    fetch: async (url, init) => ({
       ok: true,
       json: async () => {
+        fetchCalls.push(String(url) + (init && init.method === 'POST' ? ' POST' : ''));
         if (String(url).endsWith('/installed')) {
           return { ok: true, data: { profileName: 'web', profileDir: 'D:/x/profiles/web', safeMode: false, items: [
             // 不可卸载的（市场自己）、可卸载的、被停用的，三种行各来一个。
             { name: '@easytz/dsh-market', version: '0.1.0', removable: false, canDisable: false, entryIds: ['dsdesktop-market'], enabled: true },
-            { name: '@easytz/dsh-git', version: '0.5.0', removable: true, canDisable: true, entryIds: ['dsdesktop-git'], enabled: true },
+            // 带一个「有更新」的，好让更新徽章/按钮那条路径也真的跑一遍。
+            { name: '@easytz/dsh-git', version: '0.5.0', removable: true, canDisable: true, entryIds: ['dsdesktop-git'], enabled: true, installedVersion: '0.5.0', latestVersion: '0.6.0', updateAvailable: true },
             { name: 'cost-meter', version: '1.0.0', removable: true, canDisable: true, entryIds: ['cost-meter'], enabled: false },
           ] } };
         }
@@ -220,6 +225,7 @@ function loadModule() {
   assert.strictEqual(registrations.length, 1, '应恰好注册一次');
   const mod = registrations[0].factory(fakeRequire);
   mod.__render = reactHooks.__render;
+  mod.__fetchCalls = fetchCalls;
   return mod;
 }
 
@@ -306,6 +312,32 @@ test('停用插件之后，横幅上要给一个重启按钮（改动要下次�
     const restart = after.filter((n) => n.type === 'button')
       .some((b) => (JSON.stringify(b.props.children ?? null) ?? '').includes('market.detail.restart'));
     assert.ok(restart, '横幅里应有「重启应用」按钮');
+  } finally {
+    cleanup();
+  }
+});
+
+test('已安装的插件有新版本时要给徽章和更新按钮，点了要真的调用 /install', async () => {
+  try {
+    const { mod, captured, injected, t } = mount();
+    const panel = captured['shell.overlay:market-panel'];
+    const { store } = injected['market-panel'];
+    store.toggle();
+
+    const render = () => panel({ t, store });
+    const tree = flatten(await mod.__render(render));
+    const texts = tree.map((n) => JSON.stringify((n.props && n.props.children) ?? null) ?? '');
+    assert.ok(texts.some((x) => x.includes('market.badge.update')), '有更新的插件应该有「有更新」徽章');
+
+    const updateBtn = tree.filter((n) => n.type === 'button')
+      .find((b) => (JSON.stringify(b.props.children ?? null) ?? '').includes('market.detail.updateTo'));
+    assert.ok(updateBtn, '应该有「更新到」按钮');
+    // 只调这一个按钮的处理器，不用 fireAll——同样是为了不把关闭/tab 按钮也点了。
+    updateBtn.props.onClick();
+    await new Promise((r) => setTimeout(r, 0));
+    // 光断言「点了不抛」抓不住 onClick 接错回调、变成空操作这类问题——必须确认
+    // 它真的把请求打到了 /install（用最新版本重装等同于更新，见后端 handleInstall）。
+    assert.ok(mod.__fetchCalls.includes('/api/dsdesktop/market/install POST'), '点更新按钮应该调用 /install');
   } finally {
     cleanup();
   }

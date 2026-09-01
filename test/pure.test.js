@@ -7,7 +7,8 @@ import {
   buildSearchText, githubSlug, installability, isExactVersion, isValidPackageName,
   applyDownloads, extractImages, formatDownloads, imageCandidates, isBadgeUrl,
   normalizeDownloads, resolveImageUrl,
-  normalizeInstalled, normalizeManifest, normalizeSearchHits, tailLines
+  normalizeInstalled, normalizeManifest, normalizeSearchHits, tailLines,
+  compareVersions, isUpdateAvailable
 } from "../lib/pure.js";
 
 test("buildSearchText: 空查询按关键词浏览，有查询词时也带关键词限定", () => {
@@ -338,4 +339,31 @@ test("imageCandidates: 配了镜像时，镜像候选排在最后且只镜像 Gi
   assert.equal(trimmed[1], "https://gh-proxy.com/https://raw.githubusercontent.com/o/r/HEAD/a.png");
   // 没配镜像时行为完全不变
   assert.equal(imageCandidates("a.png", { slug: "o/r" }).length, 1);
+});
+
+test("compareVersions: 正常比较 major/minor/patch", () => {
+  assert.equal(compareVersions("1.2.3", "1.2.2"), 1);
+  assert.equal(compareVersions("1.2.3", "1.2.3"), 0);
+  assert.equal(compareVersions("1.2.3", "1.2.4"), -1);
+  assert.equal(compareVersions("2.0.0", "1.9.9"), 1);
+});
+
+test("compareVersions: 带预发布标签的版本比同号正式版旧", () => {
+  assert.equal(compareVersions("1.0.0", "1.0.0-rc.1"), 1);
+  assert.equal(compareVersions("1.0.0-rc.1", "1.0.0"), -1);
+  assert.equal(compareVersions("1.0.0-rc.2", "1.0.0-rc.1"), 1);
+});
+
+test("compareVersions: 解析不了就是 null，不瞎猜方向", () => {
+  assert.equal(compareVersions("not-a-version", "1.0.0"), null);
+  assert.equal(compareVersions("1.0.0", ""), null);
+  assert.equal(compareVersions(null, "1.0.0"), null);
+});
+
+test("isUpdateAvailable: 已装版本旧才算有更新，一样新/更新/解析失败都不算", () => {
+  assert.equal(isUpdateAvailable("0.1.0", "0.2.0"), true);
+  assert.equal(isUpdateAvailable("0.2.0", "0.2.0"), false);
+  assert.equal(isUpdateAvailable("0.3.0", "0.2.0"), false);
+  assert.equal(isUpdateAvailable("weird", "0.2.0"), false);
+  assert.equal(isUpdateAvailable(null, null), false);
 });
