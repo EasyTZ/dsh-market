@@ -112,14 +112,48 @@ function loadModule() {
     // enabled，任何靠比对前后差异判断的逻辑都会被这份假数据本身骗过去）。
     fetch: (() => {
       const enabledOverrides = {};
+      // 真实后端里 pnpm remove 一跑完，/installed 立刻就查不到那个包了——测试的假
+      // fetch 也要维持这个关系，否则「卸载之后 /installed 还查得到」这条前提在
+      // 测试里永远不成立，「卸载后应该还留一个幽灵行」这种断言就测不出真假。
+      const uninstalledNames = new Set();
+      // 这个假 React 的 effect 不认依赖数组、每一轮都会重跑（见下面 __render 的
+      // 注释），/capabilities 的 fetch 因此会被反复重新发起。/settings/save 存了
+      // 什么，/capabilities 就必须照实吐回来——不然乐观更新的开关状态会被这个
+      // 重复触发的 fetch 用「服务端一直没变过」的假数据活活覆盖回去，跟真实场景
+      // （effect 只在依赖真的变了才重跑）完全对不上。
+      let registryMirrorState = false;
       return async (url, init) => ({
         ok: true,
         json: async () => {
           fetchCalls.push(String(url) + (init && init.method === 'POST' ? ' POST' : ''));
+          if (String(url).endsWith('/settings/save')) {
+            const body = JSON.parse(init.body);
+            if (Object.prototype.hasOwnProperty.call(body, 'registryMirror')) registryMirrorState = body.registryMirror === true;
+            return { ok: true, data: { imageMirror: '', registryMirror: registryMirrorState } };
+          }
           if (String(url).endsWith('/profile-plugins/toggle')) {
             const body = JSON.parse(init.body);
             enabledOverrides[body.name] = body.enabled;
             return { ok: true, data: { name: body.name, enabled: body.enabled, entryIds: [] } };
+          }
+          if (String(url).endsWith('/uninstall')) {
+            const body = JSON.parse(init.body);
+            uninstalledNames.add(body.name);
+            return { ok: true, data: { name: body.name, output: '' } };
+          }
+          if (String(url).endsWith('/install')) {
+            const body = JSON.parse(init.body);
+            return { ok: true, data: { name: body.name, version: body.version || '2.0.0', drifted: false, output: '' } };
+          }
+          if (String(url).includes('/detail?')) {
+            // 详情页要用到的字段跟搜索结果不是同一份形状（installable/keywords/
+            // images 都是 detail 专属），给一份真实形状，不然 DiscoverDetail 里
+            // `data.keywords.length` 这类字段访问会在 undefined 上直接炸。
+            return { ok: true, data: {
+              name: 'dsh-new-thing', version: '2.0.0', description: 'a fresh plugin',
+              license: 'MIT', dependencies: 0, github: null, repository: null, homepage: null,
+              deprecated: null, keywords: ['dsh-plugin'], images: [], installable: true, reason: null,
+            } };
           }
           if (String(url).endsWith('/installed')) {
             const fixture = [
@@ -132,17 +166,26 @@ function loadModule() {
               { name: '@easytz/dsh-git', version: '0.5.0', removable: true, canDisable: true, entryIds: ['dsdesktop-git'], enabled: true, installedVersion: '0.5.0', latestVersion: '0.6.0', updateAvailable: true },
               { name: 'cost-meter', version: '1.0.0', removable: true, canDisable: true, entryIds: ['cost-meter'], enabled: false },
             ];
-            const items = fixture.map((item) => (
-              item.name in enabledOverrides ? { ...item, enabled: enabledOverrides[item.name] } : item
-            ));
+            const items = fixture
+              .filter((item) => !uninstalledNames.has(item.name))
+              .map((item) => (
+                item.name in enabledOverrides ? { ...item, enabled: enabledOverrides[item.name] } : item
+              ));
             return { ok: true, data: { profileName: 'web', profileDir: 'D:/x/profiles/web', safeMode: false, items } };
           }
           if (String(url).endsWith('/capabilities')) {
-            return { ok: true, data: { canInstall: true, busy: false, imageMirror: '' } };
+            return { ok: true, data: { canInstall: true, busy: false, imageMirror: '', registryMirror: registryMirrorState } };
           }
           if (String(url).endsWith('/bundled')) {
             // 一个「随应用分发但当前没装」的，好让那一组也渲染出来。
             return { ok: true, data: { plugins: [{ packageName: '@easytz/dsh-ui-balance', version: '0.5.0', installed: false }] } };
+          }
+          if (String(url).includes('/search?')) {
+            // 发现 tab 用的一条搜索结果——带下载量，好让卡片上的下载量、以及卡片
+            // 自带的安装按钮这两条路径都真的跑一遍。
+            return { ok: true, data: { total: 1, sort: 'downloads-week', items: [
+              { name: 'dsh-new-thing', version: '2.0.0', description: 'a fresh plugin', keywords: ['dsh-plugin'], license: 'MIT', date: '2026-01-01', publisher: 'someone', repository: null, github: null, tagged: true, downloads: 42 },
+            ] } };
           }
           return { ok: true, data: { items: [], objects: [], total: 0 } };
         },
@@ -328,7 +371,7 @@ test('停用插件之后，横幅上要给一个重启按钮（改动要下次�
     const after = flatten(await mod.__render(render));
 
     const texts = after.map((n) => JSON.stringify((n.props && n.props.children) ?? null) ?? '');
-    assert.ok(texts.some((x) => x.includes('market.toggle.pending')), '应出现「重启后生效」横幅');
+    assert.ok(texts.some((x) => x.includes('market.pending.restart')), '应出现「重启后生效」横幅');
     // 光提示「请重启」等于把活儿丢回给用户：重启入口就在 preload 桥上。
     const restart = after.filter((n) => n.type === 'button')
       .some((b) => (JSON.stringify(b.props.children ?? null) ?? '').includes('market.detail.restart'));
@@ -354,7 +397,7 @@ test('一个插件先关再开，跟内核当前状态相比没有净改动，�
     first.props.onChange({ target: { checked: false }, preventDefault() {}, stopPropagation() {} });
     const afterOff = flatten(await mod.__render(render));
     assert.ok(
-      afterOff.map((n) => JSON.stringify((n.props && n.props.children) ?? null) ?? '').some((x) => x.includes('market.toggle.pending')),
+      afterOff.map((n) => JSON.stringify((n.props && n.props.children) ?? null) ?? '').some((x) => x.includes('market.pending.restart')),
       '关掉之后应该先出现横幅——这是下一步的前提'
     );
 
@@ -365,7 +408,7 @@ test('一个插件先关再开，跟内核当前状态相比没有净改动，�
     const afterOn = flatten(await mod.__render(render));
 
     const texts = afterOn.map((n) => JSON.stringify((n.props && n.props.children) ?? null) ?? '');
-    assert.ok(!texts.some((x) => x.includes('market.toggle.pending')), '关了又开等于没变，不该再显示「重启后生效」横幅');
+    assert.ok(!texts.some((x) => x.includes('market.pending.restart')), '关了又开等于没变，不该再显示「重启后生效」横幅');
   } finally {
     cleanup();
   }
@@ -401,6 +444,335 @@ test('已安装的插件有新版本时要给徽章和更新按钮，点了要�
     assert.strictEqual(restartButtons.length, 1, '重启按钮应该只出现一次（共用横幅里），不该每张卡片各配一个');
     const afterTexts = after.map((n) => JSON.stringify((n.props && n.props.children) ?? null) ?? '');
     assert.ok(afterTexts.some((x) => x.includes('market.pending.restart')), '更新成功后应该点亮共用的「重启后生效」横幅');
+  } finally {
+    cleanup();
+  }
+});
+
+test('卸载是单向门：成功后整个内容区域应该锁住，不能再点别的按钮（避免连续卸载时数据错乱）', async () => {
+  // 真实反馈：连续卸载两个插件时 UI 出过重复行的 bug——一个显示已删除、还多出一个
+  // 同名的。根因是之前维护了一份独立的「幽灵行」快照，跟 /installed 刷新回来的
+  // 真实数据之间有竞态窗口。用户反馈这个体验也太生硬，要求直接复用原来的卡片、
+  // 别整专门的框：改成卸载成功后不再造幽灵行，直接把整个内容区域锁住（复用 busy
+  // 已有的 disabled 管线，所有按钮/开关本来就认这个），逼用户重启才能继续操作——
+  // 连续卸载这个场景从产品设计上就不再可能发生，bug 也就无从谈起。
+  try {
+    const { mod, captured, injected, t } = mount();
+    const panel = captured['shell.overlay:market-panel'];
+    const { store } = injected['market-panel'];
+    store.toggle();
+
+    const render = () => panel({ t, store });
+    const findDanger = (tree, title) => tree.filter((n) => n.type === 'button')
+      .find((b) => typeof b.props.className === 'string' && b.props.className.includes('dsmkDangerBtn') && b.props.title === title);
+
+    const before = flatten(await mod.__render(render));
+    const armBtn = findDanger(before, 'cost-meter');
+    assert.ok(armBtn, 'cost-meter 应该有卸载按钮');
+    // 两段式确认：第一下只是武装，不真的卸载。
+    armBtn.props.onClick();
+    const armed = flatten(await mod.__render(render));
+    const confirmBtn = findDanger(armed, 'cost-meter');
+    assert.ok(confirmBtn, '武装后按钮应该还在（换成「确认卸载？」）');
+    confirmBtn.props.onClick();
+    await new Promise((r) => setTimeout(r, 0));
+
+    const after = flatten(await mod.__render(render));
+    assert.ok(mod.__fetchCalls.includes('/api/dsdesktop/market/uninstall POST'), '第二下才应该真的调用 /uninstall');
+
+    // 内容区域应该压暗，给一个「锁住了」的视觉信号。
+    assert.ok(
+      after.some((n) => typeof n.props.className === 'string' && n.props.className.includes('dsmkBodyLocked')),
+      '锁住后内容区域应该带上压暗的样式类'
+    );
+
+    // 另一个插件（dsh-git）的卸载按钮该还在，但不能再点——不然还是能连续卸载。
+    const otherDanger = findDanger(after, '@easytz/dsh-git');
+    assert.ok(otherDanger, 'dsh-git 的卸载按钮应该还在（没被拿掉，只是禁用）');
+    assert.strictEqual(otherDanger.props.disabled, true, '锁住之后别的插件也不能再卸载，得先重启');
+
+    // 开关也该被禁掉，不能趁着这个中间状态继续改停用/启用。
+    const toggleInput = after.find((n) => n.type === 'input' && n.props.type === 'checkbox');
+    assert.ok(toggleInput, '开关还在');
+    assert.strictEqual(toggleInput.props.disabled, true, '锁住之后开关也不能再点');
+  } finally {
+    cleanup();
+  }
+});
+
+test('重启横幅显示的是总改动数——装/卸插件现在也计数了，不再是一句没有数字的提示', async () => {
+  // 真实反馈：装/卸插件成功后横幅只说「有插件改动，重启后生效」，没有数字；
+  // 停用/启用却有（「有 {n} 项...改动」）。用户记得之前是有计数的，两者现在统一成
+  // 同一份总数。默认的 identity t 测不出数字对不对——「market.pending.restart」
+  // 这个 key 本身不含 {n}，fmt() 替换了也看不出差别——所以这里换一个认得 {n}
+  // 占位符的假 t，直接从渲染结果里读数字。
+  try {
+    const { mod, captured, injected } = mount();
+    const t = (k) => (k === 'market.pending.restart' ? 'PENDING:{n}' : k);
+    const panel = captured['shell.overlay:market-panel'];
+    const { store } = injected['market-panel'];
+    store.toggle();
+
+    const render = () => panel({ t, store });
+    const tree = flatten(await mod.__render(render));
+    const updateBtn = tree.filter((n) => n.type === 'button')
+      .find((b) => (JSON.stringify(b.props.children ?? null) ?? '').includes('market.detail.updateTo'));
+    assert.ok(updateBtn, '应该有「更新到」按钮');
+    updateBtn.props.onClick();
+    await new Promise((r) => setTimeout(r, 0));
+
+    const afterInstall = flatten(await mod.__render(render));
+    const textsAfterInstall = afterInstall.map((n) => JSON.stringify((n.props && n.props.children) ?? null) ?? '');
+    assert.ok(textsAfterInstall.some((x) => x.includes('PENDING:1')), '装/卸插件应该跟停用/启用一样带上数字，装一次应该是 1');
+
+    // 再关掉一个开关，数字应该累加到 2（1 次更新 + 1 次开关净改动）——两种改动
+    // 共用同一个总数，不是各画各的。
+    const toggleInput = afterInstall.find((n) => n.type === 'input' && n.props.type === 'checkbox' && typeof n.props.onChange === 'function');
+    assert.ok(toggleInput, '应该还能找到一个开关');
+    toggleInput.props.onChange({ target: { checked: false }, preventDefault() {}, stopPropagation() {} });
+    const afterToggle = flatten(await mod.__render(render));
+    const textsAfterToggle = afterToggle.map((n) => JSON.stringify((n.props && n.props.children) ?? null) ?? '');
+    assert.ok(textsAfterToggle.some((x) => x.includes('PENDING:2')), '装/卸的计数应该跟开关的计数加在一起显示总数');
+  } finally {
+    cleanup();
+  }
+});
+
+test('重启横幅跨 tab 都看得见——装/卸插件是在「发现」tab 点的，不能只在「已安装」才露面', async () => {
+  // 真实故障：横幅曾经卷在「已安装」tab 自己的内容树里，用户在「发现」tab 点了
+  // 安装、成功了，切回「发现」逛别的插件时完全看不到任何重启提示——市场面板已经
+  // 关掉了，用户根本不知道刚装的插件要重启才会真的加载出来。横幅现在应该挂在
+  // Tabs 和 Body 之间，跟当前在哪个 tab 无关。
+  try {
+    const { mod, captured, injected, t } = mount();
+    const panel = captured['shell.overlay:market-panel'];
+    const { store } = injected['market-panel'];
+    store.toggle();
+
+    const render = () => panel({ t, store });
+    const tree = flatten(await mod.__render(render));
+
+    // 触发一次会点亮横幅的动作：更新已安装的 @easytz/dsh-git（fixture 里带
+    // updateAvailable: true）。跟前一个用例一样只调这一个按钮，不用 fireAll。
+    const updateBtn = tree.filter((n) => n.type === 'button')
+      .find((b) => (JSON.stringify(b.props.children ?? null) ?? '').includes('market.detail.updateTo'));
+    assert.ok(updateBtn, '应该有「更新到」按钮');
+    updateBtn.props.onClick();
+    await new Promise((r) => setTimeout(r, 0));
+
+    const afterUpdate = flatten(await mod.__render(render));
+    const discoverTabBtn = afterUpdate.filter((n) => n.type === 'button')
+      .find((b) => (JSON.stringify(b.props.children ?? null) ?? '').includes('market.tab.discover'));
+    assert.ok(discoverTabBtn, '应该有「发现」tab 按钮');
+    discoverTabBtn.props.onClick();
+
+    const onDiscover = flatten(await mod.__render(render));
+    const texts = onDiscover.map((n) => JSON.stringify((n.props && n.props.children) ?? null) ?? '');
+    assert.ok(texts.some((x) => x.includes('market.pending.restart')), '切到「发现」tab 后，共用的「重启后生效」横幅仍应可见');
+    const restartBtn = onDiscover.filter((n) => n.type === 'button')
+      .some((b) => (JSON.stringify(b.props.children ?? null) ?? '').includes('market.detail.restart'));
+    assert.ok(restartBtn, '「发现」tab 上也应该能直接点重启，不用先切回「已安装」');
+  } finally {
+    cleanup();
+  }
+});
+
+test('发现卡片上直接有安装按钮，不用点进详情才能装', async () => {
+  // 真实反馈：卡片本身可以点开看详情，但要装一个插件必须先点进去，多一步。
+  // 现在卡片上直接给一个安装按钮，点它就装，不用先看详情；点按钮不该顺带展开
+  // 详情（两者是完全独立的两个操作——按钮点击要 stopPropagation，不然点它会
+  // 同时触发卡片自己的展开）。
+  try {
+    const { mod, captured, injected, t } = mount();
+    const panel = captured['shell.overlay:market-panel'];
+    const { store } = injected['market-panel'];
+    store.toggle();
+
+    const render = () => panel({ t, store });
+    const first = flatten(await mod.__render(render));
+    const discoverTabBtn = first.filter((n) => n.type === 'button')
+      .find((b) => (JSON.stringify(b.props.children ?? null) ?? '').includes('market.tab.discover'));
+    assert.ok(discoverTabBtn, '应该有「发现」tab 按钮');
+    discoverTabBtn.props.onClick();
+
+    const onDiscover = flatten(await mod.__render(render));
+    // 卡片本身现在是 div（role="button"），不再是 <button>——安装按钮嵌在里面，
+    // button 套 button 是无效 HTML。找卡片就不能再靠 n.type === 'button'，靠
+    // dsmkCardName 里的名字定位。
+    const nameSpan = onDiscover.find((n) => n.type === 'span' && n.props.className === 'dsmkCardName' && n.props.children === 'dsh-new-thing');
+    assert.ok(nameSpan, '搜索结果应该渲染出这张卡片');
+
+    const installBtn = onDiscover.filter((n) => n.type === 'button')
+      .find((b) => typeof b.props.className === 'string' && b.props.className.includes('dsmkPrimaryBtn') && b.props.title === 'dsh-new-thing');
+    assert.ok(installBtn, '卡片上应该直接有安装按钮，不用先展开详情');
+    // 这个假 React 是手调处理器，不是真的 DOM 事件冒泡——点安装按钮不会像真浏览器
+    // 那样自动帮我们把点击"冒泡"到外层卡片的 onClick 上，所以下面调用 onClick 测
+    // 不出"忘了 stopPropagation"这种回归。直接查处理器的源码里有没有调
+    // stopPropagation，把这条也钉住。
+    assert.ok(installBtn.props.onClick.toString().includes('stopPropagation'),
+      '安装按钮的点击处理器必须调用 stopPropagation，否则真实浏览器里点它会连带触发卡片的展开');
+    installBtn.props.onClick({ stopPropagation() {} });
+    await new Promise((r) => setTimeout(r, 0));
+
+    assert.ok(mod.__fetchCalls.includes('/api/dsdesktop/market/install POST'), '点卡片上的安装按钮应该直接调用 /install');
+    assert.ok(!mod.__fetchCalls.some((c) => c.includes('/detail')), '不应该为了装它而先请求详情');
+
+    const after = flatten(await mod.__render(render));
+    // 没有展开详情：详情视图特有的「返回」按钮不该出现。
+    assert.ok(
+      !after.some((n) => typeof n.props.className === 'string' && n.props.className.includes('dsmkBackBtn')),
+      '点安装按钮不该顺带展开详情——两者是独立操作'
+    );
+  } finally {
+    cleanup();
+  }
+});
+
+test('发现卡片上「详情」按钮跟点卡片本身效果一样——展开详情，不触发安装', async () => {
+  try {
+    const { mod, captured, injected, t } = mount();
+    const panel = captured['shell.overlay:market-panel'];
+    const { store } = injected['market-panel'];
+    store.toggle();
+
+    const render = () => panel({ t, store });
+    const first = flatten(await mod.__render(render));
+    const discoverTabBtn = first.filter((n) => n.type === 'button')
+      .find((b) => (JSON.stringify(b.props.children ?? null) ?? '').includes('market.tab.discover'));
+    discoverTabBtn.props.onClick();
+
+    const onDiscover = flatten(await mod.__render(render));
+    const detailBtn = onDiscover.filter((n) => n.type === 'button')
+      .find((b) => typeof b.props.className === 'string' && b.props.className.includes('dsmkGhostBtn') && b.props.title === 'dsh-new-thing');
+    assert.ok(detailBtn, '卡片上应该有一个「详情」按钮');
+    assert.ok(detailBtn.props.onClick.toString().includes('stopPropagation'),
+      '「详情」按钮也要 stopPropagation，不然点它会被卡片自己的 onClick 重复触发一次展开');
+    // 「详情」按钮的处理器必须真的调用跟卡片本身同一个 onToggle——这是「功能和
+    // 点击卡片一样」这条要求最直接的落点。不用整套渲染循环去验证最终效果（这个
+    // 假 React 的 effect 不认依赖数组、每轮都会重跑，点开详情又会被「切 tab/搜索
+    // 条件变了就收起详情」那条 effect 在下一轮误当成条件变化重新收起——这是测试
+    // 工具本身的局限，不是真实浏览器里会发生的事，源码检查更可靠）。
+    assert.ok(detailBtn.props.onClick.toString().includes('onToggle()'),
+      '「详情」按钮点击应该调用 onToggle——跟点卡片本身完全同一个动作');
+    detailBtn.props.onClick({ stopPropagation() {} });
+    await new Promise((r) => setTimeout(r, 0));
+    assert.ok(!mod.__fetchCalls.includes('/api/dsdesktop/market/install POST'), '点「详情」不该触发安装');
+  } finally {
+    cleanup();
+  }
+});
+
+test('国内镜像开关：默认关，点一下应该乐观翻过去并调用 /settings/save', async () => {
+  try {
+    const { mod, captured, injected, t } = mount();
+    const panel = captured['shell.overlay:market-panel'];
+    const { store } = injected['market-panel'];
+    store.toggle();
+
+    const render = () => panel({ t, store });
+    const first = flatten(await mod.__render(render));
+    const discoverTabBtn = first.filter((n) => n.type === 'button')
+      .find((b) => (JSON.stringify(b.props.children ?? null) ?? '').includes('market.tab.discover'));
+    assert.ok(discoverTabBtn, '应该有「发现」tab 按钮');
+    discoverTabBtn.props.onClick();
+
+    const onDiscover = flatten(await mod.__render(render));
+    // 直接靠外层 label 的 title 定位这个开关，比猜 checkbox 在树里第几个稳。
+    const mirrorLabel = onDiscover.find((n) => n.type === 'label' && n.props.title === 'market.search.cnMirrorHint');
+    assert.ok(mirrorLabel, '应该有「国内镜像」这个开关');
+    const mirrorInput = flatten(mirrorLabel).find((n) => n.type === 'input' && n.props.type === 'checkbox');
+    assert.ok(mirrorInput, '开关本身（checkbox）应该在');
+    assert.strictEqual(mirrorInput.props.checked, false, '默认应该是关着的');
+
+    mirrorInput.props.onChange({ target: { checked: true }, preventDefault() {}, stopPropagation() {} });
+    const after = flatten(await mod.__render(render));
+    const afterLabel = after.find((n) => n.type === 'label' && n.props.title === 'market.search.cnMirrorHint');
+    const afterInput = flatten(afterLabel).find((n) => n.type === 'input' && n.props.type === 'checkbox');
+    assert.strictEqual(afterInput.props.checked, true, '点一下应该乐观地立刻翻成开');
+    assert.ok(mod.__fetchCalls.includes('/api/dsdesktop/market/settings/save POST'), '应该调用 /settings/save 持久化');
+  } finally {
+    cleanup();
+  }
+});
+
+test('国内镜像开关：切换之后应该重新搜索——不然列表还是切换前那个源的旧结果', async () => {
+  // 真实反馈：勾选国内镜像之后，「发现」里显示的还是旧结果，得手动改一下搜索词
+  // 或者切换 tab 才会刷新。镜像开关本质上是换了整个数据源，切换那一刻就该重新
+  // 发起搜索，不该指望用户自己想办法触发刷新。
+  try {
+    const { mod, captured, injected, t } = mount();
+    const panel = captured['shell.overlay:market-panel'];
+    const { store } = injected['market-panel'];
+    store.toggle();
+
+    const render = () => panel({ t, store });
+    const first = flatten(await mod.__render(render));
+    const discoverTabBtn = first.filter((n) => n.type === 'button')
+      .find((b) => (JSON.stringify(b.props.children ?? null) ?? '').includes('market.tab.discover'));
+    discoverTabBtn.props.onClick();
+    await mod.__render(render);
+
+    const searchCallsBefore = mod.__fetchCalls.filter((c) => c.includes('/search?')).length;
+    assert.ok(searchCallsBefore > 0, '切到发现 tab 应该已经搜过一次，这是下面对比的基线');
+
+    const onDiscover = flatten(await mod.__render(render));
+    const mirrorLabel = onDiscover.find((n) => n.type === 'label' && n.props.title === 'market.search.cnMirrorHint');
+    const mirrorInput = flatten(mirrorLabel).find((n) => n.type === 'input' && n.props.type === 'checkbox');
+    mirrorInput.props.onChange({ target: { checked: true }, preventDefault() {}, stopPropagation() {} });
+    await mod.__render(render);
+
+    const searchCallsAfter = mod.__fetchCalls.filter((c) => c.includes('/search?')).length;
+    assert.ok(searchCallsAfter > searchCallsBefore, '切换镜像开关之后应该重新发起了一次搜索');
+  } finally {
+    cleanup();
+  }
+});
+
+// 这里本来想再加一个用「卡住的 /settings/save」模拟慢网络的测试，直接验证
+// 「设置真正落盘前不该抢先用旧源重新搜」。没加成：这个测试用的迷你 React 的
+// useEffect 不认依赖数组，__render 内部每一轮都会把所有 effect 重跑一遍，这会让
+// /search 的调用次数本身就随渲染轮数疯涨，跟「是否提前用了旧设置」这个信号完全
+// 混在一起，测不出真假。这条竞态的修复本身有据可查（onToggleRegistryMirror 的
+// 注释、以及跟 runInstall/runUninstall 同款的「先等异步持久化成功、再 setRescan
+// 触发刷新」写法），只是没能在这个简化过的测试工具里可靠地钉住。
+
+test('搜索框：没打字时不该有清空按钮，打了字之后点「X」应该一键清空', async () => {
+  try {
+    const { mod, captured, injected, t } = mount();
+    const panel = captured['shell.overlay:market-panel'];
+    const { store } = injected['market-panel'];
+    store.toggle();
+
+    const render = () => panel({ t, store });
+    const first = flatten(await mod.__render(render));
+    const discoverTabBtn = first.filter((n) => n.type === 'button')
+      .find((b) => (JSON.stringify(b.props.children ?? null) ?? '').includes('market.tab.discover'));
+    discoverTabBtn.props.onClick();
+
+    const empty = flatten(await mod.__render(render));
+    assert.ok(
+      !empty.some((n) => typeof n.props.className === 'string' && n.props.className.includes('dsmkSearchClearBtn')),
+      '搜索框空着的时候不该出现清空按钮——不占位不占交互'
+    );
+
+    const input = empty.find((n) => n.type === 'input' && n.props.className === 'dsmkSearchInput');
+    assert.ok(input, '应该有搜索输入框');
+    input.props.onChange({ target: { value: 'easytz' }, preventDefault() {}, stopPropagation() {} });
+
+    const typed = flatten(await mod.__render(render));
+    const typedInput = typed.find((n) => n.type === 'input' && n.props.className === 'dsmkSearchInput');
+    assert.strictEqual(typedInput.props.value, 'easytz', '输入框应该显示打进去的内容');
+    const clearBtn = typed.find((n) => n.type === 'button' && typeof n.props.className === 'string' && n.props.className.includes('dsmkSearchClearBtn'));
+    assert.ok(clearBtn, '打了字之后应该出现清空按钮');
+
+    clearBtn.props.onClick();
+    const cleared = flatten(await mod.__render(render));
+    const clearedInput = cleared.find((n) => n.type === 'input' && n.props.className === 'dsmkSearchInput');
+    assert.strictEqual(clearedInput.props.value, '', '点「X」应该一键清空输入框');
+    assert.ok(
+      !cleared.some((n) => typeof n.props.className === 'string' && n.props.className.includes('dsmkSearchClearBtn')),
+      '清空之后按钮应该跟着消失'
+    );
   } finally {
     cleanup();
   }
@@ -488,6 +860,72 @@ test('__test__ 导出的行级组件能单独渲染（列表项是最常改的�
         onToggle() {}, onInstall() {},
       });
     }
+  } finally {
+    cleanup();
+  }
+});
+
+test('InstalledRow: 随包分发的插件（spec 是本地 file: 路径）不该把绝对路径糊在用户脸上', () => {
+  // 真实反馈：「我自带的几个插件的声明为什么都是路径？」——随应用分发的插件走的
+  // 是本地 tgz（file:C:\Users\...\bundled\xxx.tgz），这是刻意的设计（离线能装
+  // 回来），但原样显示这条路径，用户会一头雾水以为出了什么问题。应该换成人话，
+  // 完整路径退到 title（hover 提示）里。
+  try {
+    const mod = loadModule();
+    const { InstalledRow } = mod.__test__;
+    const t = (k) => k;
+    const rawPath = 'file:C:/Users/easyx/.dsh/.dsdesktop/bundled/easytz-dsh-git-0.5.0.tgz';
+
+    const bundled = flatten(InstalledRow({
+      t, busy: null, action: null, canInstall: true,
+      item: { name: '@easytz/dsh-git', version: '0.5.0', installedVersion: '0.5.0', spec: rawPath, removable: true, canDisable: true, entryIds: ['dsdesktop-git'], enabled: true },
+      onUninstall() {}, onToggle() {},
+    }));
+    // 只看每个节点自己**直接**的文本 children（不是整棵子树序列化后的 JSON——
+    // 那样会把子孙节点的 title 属性也带进来，测不出「文本内容」和「hover 提示」
+    // 这两个完全不同的地方各放了什么）。
+    const visibleTexts = bundled.filter((n) => typeof n.props.children === 'string').map((n) => n.props.children);
+    assert.ok(!visibleTexts.some((s) => s.includes('file:') || s.includes('C:/Users')),
+      '不该把 file: 路径 / 本地文件系统路径原样显示成看得见的文字');
+    assert.ok(visibleTexts.includes('market.installed.bundledSpec'), '应该换成人话说明——「随应用分发」这类文案');
+
+    // 完整路径还在，只是退到 title 里（hover 提示），好奇的人还是能看到。
+    const specSpan = bundled.find((n) => n.type === 'span' && n.props.children === 'market.installed.bundledSpec');
+    assert.ok(specSpan, '应该有一个 span 显示这句人话');
+    assert.ok(typeof specSpan.props.title === 'string' && specSpan.props.title.includes('bundled'),
+      '这个 span 的 title 属性（hover 提示）应该带着完整路径');
+
+    // 对照组：普通从 npm 装的（spec 是精确版本号），行为不该变——这条路径原来的
+    // 显示逻辑必须原封不动，不能因为加了 file: 分支就连带把正常场景也改坏了。
+    const normal = flatten(InstalledRow({
+      t, busy: null, action: null, canInstall: true,
+      item: { name: 'dsh-xueqiu', version: '1.22.13', installedVersion: '1.22.13', spec: '1.22.13', removable: true, canDisable: true, entryIds: ['xueqiu'], enabled: true },
+      onUninstall() {}, onToggle() {},
+    }));
+    assert.ok(normal.some((n) => n.type === 'span' && n.props.children === 'market.installed.spec'),
+      '正常场景应该还是原来那条「声明 {s}」的文案（identity t 下 fmt 替换不了 {s}，key 本身原样透出）');
+  } finally {
+    cleanup();
+  }
+});
+
+test('ActionResult: 收到 null 时什么都不画——发现 tab 按名字过滤 action 就是靠这个', () => {
+  // 真实故障：装/卸一个包失败后，用户点开发现 tab 里的另一张卡片，还没点任何按钮，
+  // 就看见「包管理器执行失败」——因为 App 组件里 action 是全局的（服务端一次只跑
+  // 一个 pnpm），而 DiscoverDetail 原样把它转给 ActionResult 渲染，不管名字对不对。
+  // 修复是在调用 DiscoverDetail 那一处按 `action.name === expanded` 过滤，名字不对
+  // 就传 null。这里直接验证 ActionResult 收到 null 确实不产生任何残留提示，
+  // 以及收到真是自己的 action 时照常显示——把这个约定钉死，回归就会在这里报红。
+  try {
+    const mod = loadModule();
+    const { ActionResult } = mod.__test__;
+    const t = (k) => k;
+
+    assert.strictEqual(ActionResult({ t, action: null }), null, '没有 action 不该画出任何东西');
+
+    const shown = flatten(ActionResult({ t, action: { kind: 'install', name: 'other-pkg', status: 'error', message: 'boom' } }));
+    assert.ok(shown.some((n) => n.props && typeof n.props.className === 'string' && n.props.className.includes('dsmkResultErr')),
+      '真是自己的 action 时该照常显示错误');
   } finally {
     cleanup();
   }

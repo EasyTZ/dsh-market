@@ -4,20 +4,24 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import {
-  buildSearchText, githubSlug, installability, isExactVersion, isValidPackageName,
+  buildSearchText, filterTaggedIndex, githubSlug, installability, isExactVersion, isValidPackageName,
   applyDownloads, extractImages, formatDownloads, imageCandidates, isBadgeUrl,
   normalizeDownloads, resolveImageUrl,
-  normalizeInstalled, normalizeManifest, normalizeSearchHits, tailLines,
+  normalizeInstalled, normalizeManifest, normalizeMirror, normalizeSearchHits, packageUrlPath,
+  paginateTagged, planSettingsUpdate, tailLines,
   compareVersions, isUpdateAvailable
 } from "../lib/pure.js";
 
-test("buildSearchText: 空查询按关键词浏览，有查询词时也带关键词限定", () => {
-  assert.equal(buildSearchText(""), "keywords:dsh-plugin");
-  assert.equal(buildSearchText("  "), "keywords:dsh-plugin");
-  assert.equal(buildSearchText("git"), "git keywords:dsh-plugin");
-  // all 模式（用户勾了「搜索全部 npm」）不加限定
-  assert.equal(buildSearchText("git", false), "git");
-  assert.equal(buildSearchText("", false), "keywords:dsh-plugin");
+test("buildSearchText: 不再拼 keywords: 限定语法——空查询退化成纯文本的 dsh-plugin 基线，有查询词原样透传", () => {
+  // 真实故障史（详见函数自己的注释）：`keywords:dsh-plugin` 这种字段限定语法，
+  // 跟自由词拼在一起会让官方 registry 把自由词几乎整个忽略（"easytz" 那次故障）；
+  // npmmirror.com 国内镜像上这语法干脆整个不认，哪怕单独搜都是 total:0（"国内
+  // 镜像下发现页是空的" 那次故障）。两次故障都指向同一个修复：不再用限定语法。
+  assert.equal(buildSearchText(""), "dsh-plugin");
+  assert.equal(buildSearchText("  "), "dsh-plugin");
+  assert.equal(buildSearchText("git"), "git", "有查询词就该原样透传，不该被拼上别的东西");
+  assert.equal(buildSearchText("easytz"), "easytz");
+  assert.equal(buildSearchText("keywords:dsh-plugin"), "keywords:dsh-plugin", "用户自己想打这种语法也随他，函数不替他加工");
 });
 
 test("githubSlug: 认得四种常见仓库写法", () => {
@@ -62,6 +66,118 @@ test("normalizeSearchHits: 没有 name 的条目直接丢掉（拿它没法做�
 test("normalizeSearchHits: 输入完全不是那个形状时返回空，不抛", () => {
   assert.deepEqual(normalizeSearchHits(null).items, []);
   assert.deepEqual(normalizeSearchHits({ objects: "nope" }).items, []);
+});
+
+test("paginateTagged: 只留 tagged 的，total 是过滤后的数量，不是原始数组长度", () => {
+  // 复刻真实故障：搜自己的包名前缀（比如 "easytz"）时，npm 把「keywords: 限定」
+  // 和查询词拼在一起会整个吃掉查询词（见 lib/index.js 里 handleSearch 的说明），
+  // 所以这个组合改成不加限定去搜、自己按 tagged 过滤——这里就是那步过滤 + 分页
+  // 的逻辑，必须只统计真正打了 dsh-plugin 关键词的那些。
+  const items = [
+    { name: "a", tagged: true },
+    { name: "b", tagged: false },
+    { name: "c", tagged: true },
+    { name: "d", tagged: false },
+    { name: "e", tagged: true }
+  ];
+  const { total, items: page } = paginateTagged(items, 0, 10);
+  assert.equal(total, 3, "total 应该是 tagged 的数量（3），不是原始数组长度（5）");
+  assert.deepEqual(page.map((i) => i.name), ["a", "c", "e"]);
+});
+
+test("paginateTagged: 过滤之后才分页——不能先按 from/size 切原始数组再过滤", () => {
+  // 这条专门卡住「先分页再过滤」这个更省事但错误的写法：如果 from/size 是切在
+  // 原始（未过滤）数组上，第 2 页可能整页都不是 tagged 的，用户翻页会看到空白，
+  // 即便总共明明还有没看过的 tagged 结果。
+  const items = [
+    { name: "untagged-1", tagged: false },
+    { name: "untagged-2", tagged: false },
+    { name: "tagged-1", tagged: true },
+    { name: "tagged-2", tagged: true },
+    { name: "tagged-3", tagged: true }
+  ];
+  // size=2 的「第一页」：如果错误地先切 items[0:2]（两条都是 untagged）再过滤，
+  // 会拿到空列表；正确顺序（先过滤再切）应该拿到前两条 tagged 的。
+  const { total, items: page } = paginateTagged(items, 0, 2);
+  assert.equal(total, 3);
+  assert.deepEqual(page.map((i) => i.name), ["tagged-1", "tagged-2"]);
+});
+
+test("paginateTagged: from 超出范围时返回空列表，不抛", () => {
+  const items = [{ name: "a", tagged: true }];
+  assert.deepEqual(paginateTagged(items, 5, 10).items, []);
+});
+
+test("filterTaggedIndex: 空查询返回全量列表，不修改原数组", () => {
+  const items = [
+    { name: "dsh-git", description: "git tools", keywords: ["dsh-plugin"], publisher: "easytz", repository: "https://github.com/easytz/dsh-git", github: "easytz/dsh-git" },
+    { name: "dsh-pocket", description: "pocket", keywords: ["dsh-plugin"], publisher: "bob", repository: null, github: null }
+  ];
+  const filtered = filterTaggedIndex(items, "");
+  assert.deepEqual(filtered, items);
+  assert.notEqual(filtered, items, "返回的应该是副本，调用方继续 slice/排序不会动到缓存里的全量索引");
+});
+
+test("filterTaggedIndex: 用户词按空白拆开，每个词都必须在名字/描述/关键词/发布者/仓库里出现", () => {
+  const items = [
+    { name: "dsh-git", description: "git tools", keywords: ["dsh-plugin"], publisher: "easytz", repository: "https://github.com/easytz/dsh-git", github: "easytz/dsh-git" },
+    { name: "dsh-pocket", description: "pocket", keywords: ["dsh-plugin"], publisher: "bob", repository: null, github: null },
+    { name: "dsh-terminal-panel", description: "terminal in panel", keywords: ["dsh-plugin"], publisher: "alice", repository: "https://github.com/alice/dsh-terminal-panel", github: "alice/dsh-terminal-panel" }
+  ];
+  assert.deepEqual(filterTaggedIndex(items, "git").map((i) => i.name), ["dsh-git"]);
+  assert.deepEqual(filterTaggedIndex(items, "easytz").map((i) => i.name), ["dsh-git"]);
+  assert.deepEqual(filterTaggedIndex(items, "panel terminal").map((i) => i.name), ["dsh-terminal-panel"]);
+  assert.deepEqual(filterTaggedIndex(items, "no-such-word"), []);
+});
+
+test("normalizeMirror: 只认 https 前缀的合法地址，其余一律当成没配", () => {
+  assert.equal(normalizeMirror("https://gh-proxy.com/"), "https://gh-proxy.com/");
+  assert.equal(normalizeMirror("http://gh-proxy.com/"), "", "http 不算——镜像明文传输等于把出网内容拱手让人");
+  assert.equal(normalizeMirror(""), "");
+  assert.equal(normalizeMirror("   "), "");
+  assert.equal(normalizeMirror(undefined), "");
+  assert.equal(normalizeMirror("not a url"), "");
+  assert.equal(normalizeMirror(123), "", "非字符串输入不能让 new URL() 抛到调用方那里");
+});
+
+test("planSettingsUpdate: 只碰请求体里带了的字段，没提到的原样保留", () => {
+  // 真实故障场景：面板上两个设置各自独立触发（预览图镜像的重试按钮 vs 国内
+  // registry 镜像的开关），一次请求通常只带一个字段。按「整份覆盖」的写法，
+  // 先存好 imageMirror，再单独开一次 registryMirror，前者会被悄悄清空——两个
+  // 设置分别测都是绿的，只有这种「先存 A 再存 B」的顺序场景才会暴露。
+  const stored = { imageMirror: "https://gh-proxy.com/" };
+  const plan = planSettingsUpdate(stored, { registryMirror: true });
+  assert.deepEqual(plan, { ok: true, next: { imageMirror: "https://gh-proxy.com/", registryMirror: true } });
+});
+
+test("planSettingsUpdate: 反过来也一样——只存 imageMirror 不该动已经开着的 registryMirror", () => {
+  const stored = { imageMirror: "", registryMirror: true };
+  const plan = planSettingsUpdate(stored, { imageMirror: "https://gh-proxy.com/" });
+  assert.deepEqual(plan, { ok: true, next: { imageMirror: "https://gh-proxy.com/", registryMirror: true } });
+});
+
+test("planSettingsUpdate: imageMirror 非空但不是合法 https 地址要报错，不能静默丢掉", () => {
+  const plan = planSettingsUpdate({}, { imageMirror: "http://not-https.example/" });
+  assert.equal(plan.ok, false);
+  assert.equal(plan.error.code, "bad-mirror");
+});
+
+test("planSettingsUpdate: 空字符串是合法输入，表示关掉镜像", () => {
+  const plan = planSettingsUpdate({ imageMirror: "https://gh-proxy.com/" }, { imageMirror: "" });
+  assert.deepEqual(plan, { ok: true, next: { imageMirror: "" } });
+});
+
+test("planSettingsUpdate: registryMirror 只认字面意义上的 true，别的真值不能被当成开了", () => {
+  // 存进文件里的可能是任何 JSON 形状（用户手改过、旧版本格式）。宁可当「没开」
+  // 也不能把非布尔的真值（字符串 "yes"、数字 1）悄悄当成开了——那样设置页显示
+  // 是关的，实际请求却在走镜像，用户看不出这个错位。
+  const plan = planSettingsUpdate({}, { registryMirror: "yes" });
+  assert.deepEqual(plan, { ok: true, next: { registryMirror: false } });
+});
+
+test("planSettingsUpdate: 已存的设置读不出来（null / 坏格式）时不该抛，退化成空对象", () => {
+  assert.deepEqual(planSettingsUpdate(null, { registryMirror: true }), { ok: true, next: { registryMirror: true } });
+  assert.deepEqual(planSettingsUpdate("not an object", { registryMirror: true }), { ok: true, next: { registryMirror: true } });
 });
 
 test("installability: 声明了 dsh.bundle.patch 才算能装", () => {
@@ -168,6 +284,18 @@ test("isValidPackageName: 挡住会变成命令行参数的危险输入", () => 
   for (const name of [null, undefined, 42, {}, []]) {
     assert.equal(isValidPackageName(name), false);
   }
+});
+
+test("packageUrlPath: scope 前缀的 @ 不编码——npmmirror.com 只认原样的 @，编码成 %40 会 404", () => {
+  // 真实故障：@nanmicoder/dsh-agent-teams 能在国内镜像的搜索结果里刷出来（搜索走
+  // 查询参数，不涉及这段路径拼接），点进详情却说「npm 上没有这个包」——查出来是
+  // npmmirror.com 的服务端不认 `%40nanmicoder`，只认 `@nanmicoder`，而官方 npm
+  // 两种写法都认。此前统一用 encodeURIComponent 会把 @ 编码成 %40，同一份代码在
+  // 官方源上没事、切到镜像就出这个 bug。
+  assert.equal(packageUrlPath("@nanmicoder/dsh-agent-teams"), "@nanmicoder/dsh-agent-teams");
+  assert.equal(packageUrlPath("@easytz/dsh-git"), "@easytz/dsh-git");
+  // 没有 scope 的普通包名不受影响。
+  assert.equal(packageUrlPath("dsh-git"), "dsh-git");
 });
 
 test("isExactVersion: 只放行确定版本，范围一律拒绝", () => {
