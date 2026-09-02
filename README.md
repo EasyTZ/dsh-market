@@ -3,6 +3,36 @@
 [DeepSeek Harness](https://github.com/deepseek-ai/deepseek-harness)（下称 dsh）的第三方插件：**插件市场**。在侧边栏提供一个面板，浏览与搜索 npm 上的 dsh 插件、看详情、装进当前 profile、管理已安装的插件。
 
 > 目录里出现或显示为可安装，不代表经过安全审核或推荐。插件装上之后是以你的用户权限运行的本地代码。
+## 安装
+
+一条命令安装：
+
+```sh
+dsh plugin --profile <name> add @easytz/dsh-market@1.1.0
+```
+
+`<name>` 是**必填**的 dsh profile 名，必须替换成你实际使用的 profile，不能省略：
+
+- dsh 桌面版 / web 界面通常叫 `web`
+- TUI 界面通常叫 `tui`
+- 不确定时看 `$DSH_HOME/profiles/` 下的目录名，或运行 `dsh --profile <name> --help` 确认
+
+省略 `--profile <name>` 会直接报错：`error: --profile <name> is required`，所以**不加名字不会安装成功**。
+
+安装后重启 dsh，侧边栏底部会出现「插件市场」按钮。
+
+## 卸载
+
+一条命令卸载：
+
+```sh
+dsh plugin --profile <name> remove @easytz/dsh-market
+```
+
+`<name>` 与安装时一致。重启 dsh 后插件市场按钮消失。
+
+> 如果你之前按旧版文档手动往 `$DSH_HOME/profiles/<name>/cordis.patch.yml` 或 `$DSH_HOME/cordis.patch.yml` 里加过 `- insert:` 条目，卸载时把那段 YAML 一起删掉。
+
 
 ## 功能
 
