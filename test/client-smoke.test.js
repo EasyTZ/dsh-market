@@ -79,6 +79,14 @@ function fireAll(nodes) {
   return fired;
 }
 
+/**
+ * 一个够用的假 DOM 节点：能装下 scrollTop，也能应付点击外部关菜单那类探测。
+ * 高度写死成「内容比视口高很多」，这样滚动位置的读写才有意义。
+ */
+function fakeElement() {
+  return { scrollTop: 0, scrollHeight: 5000, clientHeight: 500, contains: () => false };
+}
+
 function loadModule() {
   const src = fs.readFileSync(CLIENT, 'utf8');
   const registrations = [];
@@ -211,6 +219,10 @@ function loadModule() {
   let cursor = 0;
   let dirty = false;
   const effects = [];
+  // effect 的依赖记忆（见下面 useEffect 的注释）：effectMemo 跨轮保留，
+  // effectSeq 每轮清零，用来区分「同一段源码在这一轮里的第几个实例」。
+  const effectMemo = new Map();
+  const effectSeq = new Map();
   const reactHooks = {
     useState(init) {
       const i = cursor++;
@@ -222,7 +234,33 @@ function loadModule() {
       }];
     },
     useCallback: (fn) => fn,
-    useEffect(fn, deps) { effects.push({ fn, deps }); },
+    // **依赖数组要真的认。**
+    //
+    // 早先这里是无脑 `effects.push`、每一轮把所有 effect 重跑一遍。那样「某个
+    // effect 的依赖里多写/少写了一项」这类 bug 在测试里完全看不见——而这正是
+    // 「装完一个插件，发现列表整个重搜、滚动位置丢了」的成因：搜索 effect 的依赖
+    // 里挂着装卸插件用的那个刷新信号。测试要能守住这条，替身就得会跳过。
+    //
+    // 记忆不按槽位下标存，按 **effect 函数的源码文本 + 本轮同源码的第几次**。
+    // 真 React 按 hook 调用顺序记，那要求整棵树的 hook 数量每轮一致；而这个替身
+    // 用的是一条全局共享的 cells 数组，切 tab、卡片增减都会让下标整体错位——错位
+    // 的下标配上「依赖没变就跳过」，会把该跑的 effect 跳掉，测试跟着假绿。源码
+    // 文本对每个调用点唯一，且不受别的组件在不在场影响。
+    useEffect(fn, deps) {
+      const src = String(fn);
+      const nth = effectSeq.get(src) || 0;
+      effectSeq.set(src, nth + 1);
+      const key = src + "#" + nth;
+      let cell = effectMemo.get(key);
+      if (!cell) { cell = { deps: null, first: true }; effectMemo.set(key, cell); }
+      const changed = cell.first || !deps || !cell.deps
+        || cell.deps.length !== deps.length
+        || deps.some((d, k) => !Object.is(d, cell.deps[k]));
+      cell.first = false;
+      cell.deps = deps;
+      if (changed) effects.push({ fn, deps });
+    },
+    useLayoutEffect(fn, deps) { return reactHooks.useEffect(fn, deps); },
     useMemo: (fn) => fn(),
     useRef(init) {
       const i = cursor++;
@@ -243,6 +281,15 @@ function loadModule() {
     // 自由变量 bug 抓得到），但树里只剩一层壳：行里的开关、按钮全都不在，也就没法
     // 触发它们的事件处理器。
     if (typeof node.type === 'function') return deepRender(node.type(node.props), depth + 1);
+    // 宿主元素上挂了 ref 就给它一个假 DOM 节点。真 React 会在提交阶段把真节点写进
+    // ref.current；这里不造一个，任何「读回 DOM 再改回去」的逻辑（比如从详情返回
+    // 时把滚动位置滚回原处）在测试里都会静默走空指针分支，测了个寂寞。
+    // 只在第一次赋值，之后跨轮复用同一个对象——不然每轮都换一个新节点，effect 里
+    // 记下的状态全丢。
+    if (typeof node.type === 'string' && node.props && node.props.ref && typeof node.props.ref === 'object'
+      && node.props.ref.current === null) {
+      node.props.ref.current = fakeElement();
+    }
     const children = node.props && node.props.children;
     if (children === undefined) return node;
     return { ...node, props: { ...node.props, children: deepRender(children, depth + 1) } };
@@ -257,6 +304,7 @@ function loadModule() {
       cursor = 0;
       dirty = false;
       effects.length = 0;
+      effectSeq.clear();
       last = deepRender(render());
       // **别在这里调 teardown**。面板的每个取数 effect 都用 `let alive = true` +
       // teardown 里置 false 来防竞态，立刻 teardown 等于让所有 `.then` 直接 return，
@@ -449,13 +497,18 @@ test('已安装的插件有新版本时要给徽章和更新按钮，点了要�
   }
 });
 
-test('卸载是单向门：成功后整个内容区域应该锁住，不能再点别的按钮（避免连续卸载时数据错乱）', async () => {
-  // 真实反馈：连续卸载两个插件时 UI 出过重复行的 bug——一个显示已删除、还多出一个
-  // 同名的。根因是之前维护了一份独立的「幽灵行」快照，跟 /installed 刷新回来的
-  // 真实数据之间有竞态窗口。用户反馈这个体验也太生硬，要求直接复用原来的卡片、
-  // 别整专门的框：改成卸载成功后不再造幽灵行，直接把整个内容区域锁住（复用 busy
-  // 已有的 disabled 管线，所有按钮/开关本来就认这个），逼用户重启才能继续操作——
-  // 连续卸载这个场景从产品设计上就不再可能发生，bug 也就无从谈起。
+test('卸载只压暗被卸的那一张卡片：面板其余部分照常可用，能连着卸好几个再一次重启', async () => {
+  // 这条断言的历史值得写清楚，免得又被改回去：
+  //
+  // 最早卸载会造一份独立的「幽灵行」快照，跟 /installed 刷新回来的真实数据各画各的
+  // ——同一个包出现两张卡片。当时的修法是**把整块面板锁死**：卸完一个就全部禁用、
+  // 逼用户重启，连续卸载这个场景从产品上被取消了，重复行自然也没了。
+  //
+  // 代价是「想卸三个插件就得重启三次」，用户明确要求改回来。所以这一版重新支持连续
+  // 卸载，但**不是**退回老写法：幽灵卡片只取「名字已经不在 /installed 里」的那些
+  // （lib/client.js 的 ghostItems），跟真实数据按定义互斥，重复行不靠时序去躲。
+  //
+  // 于是这个测试同时守两件事：连续卸载可用，且连续卸载之后没有重复卡片。
   try {
     const { mod, captured, injected, t } = mount();
     const panel = captured['shell.overlay:market-panel'];
@@ -465,36 +518,84 @@ test('卸载是单向门：成功后整个内容区域应该锁住，不能再�
     const render = () => panel({ t, store });
     const findDanger = (tree, title) => tree.filter((n) => n.type === 'button')
       .find((b) => typeof b.props.className === 'string' && b.props.className.includes('dsmkDangerBtn') && b.props.title === title);
+    const cardsNamed = (tree, name) => tree.filter((n) => n.props
+      && n.props.className === 'dsmkCardName' && n.props.children === name);
+    // 卡片本体（带 dsmkCard 的那个 div），用来看它有没有被压暗。
+    const cardOf = (tree, name) => {
+      const idx = tree.findIndex((n) => n.props && n.props.className === 'dsmkCardName' && n.props.children === name);
+      if (idx < 0) return null;
+      for (let i = idx; i >= 0; i -= 1) {
+        const cls = tree[i].props && tree[i].props.className;
+        if (typeof cls === 'string' && cls.includes('dsmkCard ')) return tree[i];
+      }
+      return null;
+    };
+    /** 两段式确认：第一下只是武装，第二下才真卸。 */
+    const uninstall = async (name) => {
+      const armBtn = findDanger(flatten(await mod.__render(render)), name);
+      assert.ok(armBtn, name + ' 应该有卸载按钮');
+      armBtn.props.onClick();
+      const confirmBtn = findDanger(flatten(await mod.__render(render)), name);
+      assert.ok(confirmBtn, '武装后按钮应该还在（换成「确认卸载？」）');
+      assert.strictEqual(confirmBtn.props.disabled, false, name + ' 的卸载按钮应该点得动');
+      confirmBtn.props.onClick();
+      await new Promise((r) => setTimeout(r, 0));
+    };
 
-    const before = flatten(await mod.__render(render));
-    const armBtn = findDanger(before, 'cost-meter');
-    assert.ok(armBtn, 'cost-meter 应该有卸载按钮');
-    // 两段式确认：第一下只是武装，不真的卸载。
-    armBtn.props.onClick();
-    const armed = flatten(await mod.__render(render));
-    const confirmBtn = findDanger(armed, 'cost-meter');
-    assert.ok(confirmBtn, '武装后按钮应该还在（换成「确认卸载？」）');
-    confirmBtn.props.onClick();
-    await new Promise((r) => setTimeout(r, 0));
-
+    await uninstall('cost-meter');
     const after = flatten(await mod.__render(render));
     assert.ok(mod.__fetchCalls.includes('/api/dsdesktop/market/uninstall POST'), '第二下才应该真的调用 /uninstall');
 
-    // 内容区域应该压暗，给一个「锁住了」的视觉信号。
+    // 整块内容区域不该再被压暗——那正是「卸一个就得重启一次」的根源。
     assert.ok(
-      after.some((n) => typeof n.props.className === 'string' && n.props.className.includes('dsmkBodyLocked')),
-      '锁住后内容区域应该带上压暗的样式类'
+      !after.some((n) => typeof n.props.className === 'string' && n.props.className.includes('dsmkBodyLocked')),
+      '不该再有整块压暗的锁：压暗范围只到被卸的那一张卡片'
     );
 
-    // 另一个插件（dsh-git）的卸载按钮该还在，但不能再点——不然还是能连续卸载。
-    const otherDanger = findDanger(after, '@easytz/dsh-git');
-    assert.ok(otherDanger, 'dsh-git 的卸载按钮应该还在（没被拿掉，只是禁用）');
-    assert.strictEqual(otherDanger.props.disabled, true, '锁住之后别的插件也不能再卸载，得先重启');
+    // 被卸的那张卡片：还在（留影），压暗，挂「已卸载」徽章，操作按钮全撤掉。
+    const removedCard = cardOf(after, 'cost-meter');
+    assert.ok(removedCard, '卸掉的插件应该还留一张卡片，而不是凭空消失');
+    assert.ok(removedCard.props.className.includes('dsmkCardRemoved'), '被卸的卡片应该压暗');
+    const removedTexts = flatten(removedCard).map((n) => JSON.stringify((n.props && n.props.children) ?? null) ?? '');
+    assert.ok(removedTexts.some((x) => x.includes('market.badge.removed')), '被卸的卡片应该挂「已卸载」徽章');
+    assert.equal(findDanger(after, 'cost-meter'), undefined, '被卸的卡片上不该还留着卸载按钮');
+    // 徽章已经说了「已卸载」，不再另外挂一行结果条：action 是全局单例，卸第二个的
+    // 时候第一个的那行绿字会凭空消失，看着像出了什么错。
+    assert.ok(
+      !flatten(removedCard).some((n) => typeof n.props.className === 'string' && n.props.className.includes('dsmkResultOk')),
+      '被卸的卡片上不该再有「已卸载 XXX」那行绿字'
+    );
 
-    // 开关也该被禁掉，不能趁着这个中间状态继续改停用/启用。
+    // 别的插件完全不受影响：卸载按钮点得动，开关也点得动。
+    const otherDanger = findDanger(after, '@easytz/dsh-git');
+    assert.ok(otherDanger, 'dsh-git 的卸载按钮应该还在');
+    assert.strictEqual(otherDanger.props.disabled, false, '卸了一个之后别的插件应该还能接着卸');
     const toggleInput = after.find((n) => n.type === 'input' && n.props.type === 'checkbox');
     assert.ok(toggleInput, '开关还在');
-    assert.strictEqual(toggleInput.props.disabled, true, '锁住之后开关也不能再点');
+    assert.strictEqual(toggleInput.props.disabled, false, '卸载不该把别的插件的开关也禁掉');
+
+    // 连着卸第二个：这是老版本从产品上取消掉的场景，也是重复行 bug 当年出现的地方。
+    await uninstall('@easytz/dsh-git');
+    const after2 = flatten(await mod.__render(render));
+    for (const name of ['cost-meter', '@easytz/dsh-git']) {
+      assert.strictEqual(cardsNamed(after2, name).length, 1, name + ' 只该有一张卡片（幽灵行和真实数据不能各画一张）');
+      const card = cardOf(after2, name);
+      assert.ok(card.props.className.includes('dsmkCardRemoved'), name + ' 卸掉之后应该压暗');
+    }
+    // **卡片不能因为被卸载就换位置。** 服务端按包名排（pure.js 的 normalizeInstalled），
+    // 幽灵卡片直接 append 在后面的话，卸掉的那个会当场跳到列表最末——连着卸两个，
+    // 它俩按「卸载的先后」堆在尾部，跟其余卡片的字母序对不上，看着就是列表乱了。
+    const order = after2.filter((n) => n.props && n.props.className === 'dsmkCardName')
+      .map((n) => n.props.children);
+    const idxGit = order.indexOf('@easytz/dsh-git');
+    const idxCost = order.indexOf('cost-meter');
+    assert.ok(idxGit >= 0 && idxCost >= 0, '两张卡片都该还在列表里');
+    assert.ok(idxGit < idxCost,
+      '卸载不该改变排列顺序：@easytz/dsh-git 按包名排在 cost-meter 前面，卸完还是这个顺序');
+
+    // 两次卸载都进了「重启后生效」的计数，用户一次重启就能收掉。
+    const banner = after2.map((n) => JSON.stringify((n.props && n.props.children) ?? null) ?? '');
+    assert.ok(banner.some((x) => x.includes('market.pending.restart')), '连续卸载之后应该点亮共用的「重启后生效」横幅');
   } finally {
     cleanup();
   }
@@ -623,6 +724,101 @@ test('发现卡片上直接有安装按钮，不用点进详情才能装', async
       !after.some((n) => typeof n.props.className === 'string' && n.props.className.includes('dsmkBackBtn')),
       '点安装按钮不该顺带展开详情——两者是独立操作'
     );
+  } finally {
+    cleanup();
+  }
+});
+
+test('在「发现」里装完插件不该重新搜索——重搜会把列表塌回第一页，用户翻了几屏的位置全丢', async () => {
+  // 用户反馈：在发现里往下滚了好几屏，找到一个包装上，列表哗一下回到顶部，
+  // 得从头再滚一遍。根因是搜索的 effect 依赖里挂着 `rescan`，而 `rescan` 正是
+  // 装/卸插件后用来刷新本机状态的那个信号——装完顺手把 npm 也重搜了一遍，
+  // results 被换成新的第一页，滚动位置跟着内容一起没了。
+  //
+  // npm 上的搜索结果不会因为你本机装了个包而改变，那次重搜纯属白费。现在拆成
+  // 两个信号：rescan 只刷本机状态，research 才重搜（见 lib/client.js）。
+  try {
+    const { mod, captured, injected, t } = mount();
+    const panel = captured['shell.overlay:market-panel'];
+    const { store } = injected['market-panel'];
+    store.toggle();
+
+    const render = () => panel({ t, store });
+    const first = flatten(await mod.__render(render));
+    const discoverTabBtn = first.filter((n) => n.type === 'button')
+      .find((b) => (JSON.stringify(b.props.children ?? null) ?? '').includes('market.tab.discover'));
+    discoverTabBtn.props.onClick();
+    await mod.__render(render);
+
+    const searchesBefore = mod.__fetchCalls.filter((c) => c.includes('/search?')).length;
+    assert.ok(searchesBefore > 0, '进「发现」tab 总得先搜一次');
+    const installedBefore = mod.__fetchCalls.filter((c) => c.endsWith('/installed')).length;
+
+    const onDiscover = flatten(await mod.__render(render));
+    const installBtn = onDiscover.filter((n) => n.type === 'button')
+      .find((b) => typeof b.props.className === 'string' && b.props.className.includes('dsmkPrimaryBtn') && b.props.title === 'dsh-new-thing');
+    assert.ok(installBtn, '卡片上应该有安装按钮');
+    installBtn.props.onClick({ stopPropagation() {} });
+    await new Promise((r) => setTimeout(r, 0));
+    await mod.__render(render);
+
+    assert.ok(mod.__fetchCalls.includes('/api/dsdesktop/market/install POST'), '前提：确实装了');
+    assert.strictEqual(
+      mod.__fetchCalls.filter((c) => c.includes('/search?')).length, searchesBefore,
+      '装完插件不该再打一次 /search——那会把发现列表整个换掉，滚动位置随之丢失'
+    );
+    // 但本机状态还是得刷：不然卡片上的「已安装」徽章不会亮。
+    assert.ok(
+      mod.__fetchCalls.filter((c) => c.endsWith('/installed')).length > installedBefore,
+      '装完之后仍然要重读 /installed，否则「已安装」徽章不会更新'
+    );
+  } finally {
+    cleanup();
+  }
+});
+
+test('从详情返回时把发现列表滚回原处——不然点进去看一眼，回来得从头再滚一遍', async () => {
+  // 详情态是把面板正文**整个换成**详情视图，而详情比几十张卡片的列表矮得多，
+  // 浏览器会立刻把 scrollTop 夹到新内容的高度上。等返回时列表重新长回来，
+  // scrollTop 早就不是原来那个值了。所以必须显式记下来、再显式滚回去。
+  try {
+    const { mod, captured, injected, t } = mount();
+    const panel = captured['shell.overlay:market-panel'];
+    const { store } = injected['market-panel'];
+    store.toggle();
+
+    const render = () => panel({ t, store });
+    const first = flatten(await mod.__render(render));
+    const discoverTabBtn = first.filter((n) => n.type === 'button')
+      .find((b) => (JSON.stringify(b.props.children ?? null) ?? '').includes('market.tab.discover'));
+    discoverTabBtn.props.onClick();
+
+    const onDiscover = flatten(await mod.__render(render));
+    const body = onDiscover.find((n) => typeof n.props.className === 'string' && n.props.className.includes('dsmkBody'));
+    assert.ok(body && body.props.ref && body.props.ref.current, '正文滚动容器应该挂着 ref');
+    const el = body.props.ref.current;
+
+    // 用户往下滚了几屏。
+    el.scrollTop = 1200;
+    body.props.onScroll({ currentTarget: el });
+
+    // 点开一张卡片的详情。
+    const card = onDiscover.find((n) => typeof n.props.className === 'string'
+      && n.props.className.includes('dsmkCardDiscover') && typeof n.props.onClick === 'function');
+    assert.ok(card, '应该能点开卡片详情');
+    card.props.onClick({ stopPropagation() {} });
+    const inDetail = flatten(await mod.__render(render));
+    const backBtn = inDetail.filter((n) => n.type === 'button')
+      .find((b) => typeof b.props.className === 'string' && b.props.className.includes('dsmkBackBtn'));
+    assert.ok(backBtn, '详情态应该有「返回」按钮');
+    // 真浏览器在这一刻会把 scrollTop 夹到详情那点高度上（基本等于归零）。
+    // 假 DOM 不会自己夹，这里手动模拟——不模拟的话 scrollTop 一直是 1200，
+    // 这个测试就永远绿，恢复逻辑删掉都测不出来。
+    el.scrollTop = 0;
+
+    backBtn.props.onClick();
+    await mod.__render(render);
+    assert.strictEqual(el.scrollTop, 1200, '从详情返回后应该滚回离开时的位置');
   } finally {
     cleanup();
   }
