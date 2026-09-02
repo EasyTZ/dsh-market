@@ -1126,3 +1126,59 @@ test('ActionResult: 收到 null 时什么都不画——发现 tab 按名字过�
     cleanup();
   }
 });
+
+test('网页版没有重启按钮可点，横幅就得改口说「重启 dsh 进程」', async () => {
+  // 实机反馈：朋友在 WSL 下用浏览器直连 dsh，装完卸完插件「重启按钮没出来」。
+  // 按钮确实出不来——它挂在桌面外壳 preload 注入的 window.desktop.restartApp 上，
+  // 浏览器里没有那座桥。但横幅只留一句「重启后生效」而不说重启什么、按钮又不见了，
+  // 看起来就是坏了。这里钉住：桥不在时文案要换成能照做的那一句。
+  try {
+    const { mod, captured, injected, t } = mount();
+    globalThis.window.desktop = undefined;
+    const panel = captured['shell.overlay:market-panel'];
+    const { store } = injected['market-panel'];
+    store.toggle();
+
+    const render = () => panel({ t, store });
+    const first = flatten(await mod.__render(render))
+      .find((n) => n.type === 'input' && n.props.type === 'checkbox' && typeof n.props.onChange === 'function');
+    assert.ok(first, '可停用的行上应有开关');
+    first.props.onChange({ target: { checked: false }, preventDefault() {}, stopPropagation() {} });
+    const after = flatten(await mod.__render(render));
+
+    const texts = after.map((n) => JSON.stringify((n.props && n.props.children) ?? null) ?? '');
+    assert.ok(texts.some((x) => x.includes('market.pending.restartWeb')), '网页版横幅应该说清要重启的是 dsh 进程');
+    const restart = after.filter((n) => n.type === 'button')
+      .some((b) => (JSON.stringify(b.props.children ?? null) ?? '').includes('market.detail.restart'));
+    assert.ok(!restart, '没有桌面外壳就没有能点的重启按钮，别画一个点不动的');
+  } finally {
+    cleanup();
+  }
+});
+
+
+/**
+ * 把源码里的注释行剔掉、反斜杠转义还原，再拿去匹配 CSS 规则。
+ *
+ * 这两步都不能省：这几个文件的注释里都写着 `[class*="footerActions"]` 这串选择器
+ * （在解释它为什么长这样），只 grep 源码的话，把规则整条删掉、只留注释，测试照样
+ * 绿。转义还原是因为规则可能写在双引号字符串里，文件里存的是 \" 而不是 "。
+ */
+function cssSource(file) {
+	return fs.readFileSync(file, "utf8")
+		.split("\n")
+		.filter((line) => !/^\s*(\/\/|\*|\/\*)/.test(line))
+		.join("\n")
+		.replace(/\\"/g, '"');
+}
+
+test("侧边栏 footer 的纵向排列由本插件自带，不靠别的插件的样式兜底", () => {
+  // 实机反馈：只装了市场 + 余额 + 另一个插件的机器上，三个图标挤在同一行。
+  // 上游那个容器是 display:flex（默认 row、不换行），原先只有 dsh-terminal-panel
+  // 注入了 flex-direction:column —— 装了终端面板的机器看着一切正常，没装的就露馅。
+  // 任何一个插件都可能被单独安装，所以这条规则每个 footer 插件都得自带。
+	assert.ok(
+		/\[class\*="footerActions"\]\{[^}]*flex-direction:column/.test(cssSource(CLIENT)),
+		"市场必须自己注入 footerActions 的纵向排列规则"
+	);
+});
