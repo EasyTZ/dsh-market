@@ -124,6 +124,19 @@ function loadModule() {
       // fetch 也要维持这个关系，否则「卸载之后 /installed 还查得到」这条前提在
       // 测试里永远不成立，「卸载后应该还留一个幽灵行」这种断言就测不出真假。
       const uninstalledNames = new Set();
+      // /installed 和 /updates 在真实后端里是同一份数据的两种切法（见 lib/index.js
+      // 的 collectInstalled），假 fetch 也得维持这个关系——两边各写一份 fixture，
+      // 「角标数跟列表对不上」这种 bug 就永远测不出来。
+      const fixture = () => ([
+        // 不可卸载的（宿主产品包）、可卸载的、被停用的，三种行各来一个。市场自己
+        // 不再是「不可卸载」的例子——它现在和别的插件一样能卸载，只是不能停用
+        // （见 lib/index.js 里 protectedPackages() / disableProtectedPackages()
+        // 的区分），这里换成真正不可卸载的宿主产品包，别再暗示市场卸不掉。
+        { name: '@deepseek-ai/dsh-base', version: '0.1.0', removable: false, canDisable: false, entryIds: [], enabled: true },
+        // 带一个「有更新」的，好让更新徽章/按钮、以及侧边栏那个小叹号都真的跑一遍。
+        { name: '@easytz/dsh-git', version: '0.5.0', removable: true, canDisable: true, entryIds: ['dsdesktop-git'], enabled: true, installedVersion: '0.5.0', latestVersion: '0.6.0', updateAvailable: true },
+        { name: 'cost-meter', version: '1.0.0', removable: true, canDisable: true, entryIds: ['cost-meter'], enabled: false },
+      ]);
       // 这个假 React 的 effect 不认依赖数组、每一轮都会重跑（见下面 __render 的
       // 注释），/capabilities 的 fetch 因此会被反复重新发起。/settings/save 存了
       // 什么，/capabilities 就必须照实吐回来——不然乐观更新的开关状态会被这个
@@ -163,18 +176,14 @@ function loadModule() {
               deprecated: null, keywords: ['dsh-plugin'], images: [], installable: true, reason: null,
             } };
           }
+          if (String(url).includes('/updates')) {
+            const names = fixture()
+              .filter((item) => !uninstalledNames.has(item.name) && item.updateAvailable)
+              .map((item) => item.name);
+            return { ok: true, data: { count: names.length, names } };
+          }
           if (String(url).endsWith('/installed')) {
-            const fixture = [
-              // 不可卸载的（宿主产品包）、可卸载的、被停用的，三种行各来一个。市场自己
-              // 不再是「不可卸载」的例子——它现在和别的插件一样能卸载，只是不能停用
-              // （见 lib/index.js 里 protectedPackages() / disableProtectedPackages()
-              // 的区分），这里换成真正不可卸载的宿主产品包，别再暗示市场卸不掉。
-              { name: '@deepseek-ai/dsh-base', version: '0.1.0', removable: false, canDisable: false, entryIds: [], enabled: true },
-              // 带一个「有更新」的，好让更新徽章/按钮那条路径也真的跑一遍。
-              { name: '@easytz/dsh-git', version: '0.5.0', removable: true, canDisable: true, entryIds: ['dsdesktop-git'], enabled: true, installedVersion: '0.5.0', latestVersion: '0.6.0', updateAvailable: true },
-              { name: 'cost-meter', version: '1.0.0', removable: true, canDisable: true, entryIds: ['cost-meter'], enabled: false },
-            ];
-            const items = fixture
+            const items = fixture()
               .filter((item) => !uninstalledNames.has(item.name))
               .map((item) => (
                 item.name in enabledOverrides ? { ...item, enabled: enabledOverrides[item.name] } : item
@@ -377,13 +386,13 @@ test('client.js 冒烟：打开的面板要真的渲染到有插件行', async (
     assert.ok(footer, '入口按钮应注册进 sidebar.footer.action');
     assert.ok(panel, '面板应注册进 shell.overlay');
 
-    const { store } = injected['market-panel'];
-    footer({ t, store });
+    const { store, updates } = injected['market-panel'];
+    footer({ t, store, updates });
     // 关着的时候也渲染一次：这条路径要求面板 pointer-events:none，否则关着也挡点击。
-    panel({ t, store });
+    panel({ t, store, updates });
 
     store.toggle();
-    const tree = flatten(await mod.__render(() => panel({ t, store })));
+    const tree = flatten(await mod.__render(() => panel({ t, store, updates })));
 
     // **这条断言是这个测试的重点**：光「没抛异常」不够 —— 早退分支（还在 loading）
     // 也不抛。必须确认真的渲染到了那三行插件，否则测试覆盖的还是个空壳。
@@ -406,10 +415,10 @@ test('停用插件之后，横幅上要给一个重启按钮（改动要下次�
   try {
     const { mod, captured, injected, t } = mount();
     const panel = captured['shell.overlay:market-panel'];
-    const { store } = injected['market-panel'];
+    const { store, updates } = injected['market-panel'];
     store.toggle();
 
-    const render = () => panel({ t, store });
+    const render = () => panel({ t, store, updates });
     // 这里**不能**用 fireAll：它会把关闭按钮和 tab 按钮也一起点了，面板要么关掉、
     // 要么切到「发现」，已安装那棵树根本不再渲染。只点行上的开关。
     const first = flatten(await mod.__render(render))
@@ -433,10 +442,10 @@ test('一个插件先关再开，跟内核当前状态相比没有净改动，�
   try {
     const { mod, captured, injected, t } = mount();
     const panel = captured['shell.overlay:market-panel'];
-    const { store } = injected['market-panel'];
+    const { store, updates } = injected['market-panel'];
     store.toggle();
 
-    const render = () => panel({ t, store });
+    const render = () => panel({ t, store, updates });
     const findToggle = (tree) => tree.find((n) => n.type === 'input' && n.props.type === 'checkbox' && typeof n.props.onChange === 'function');
 
     const first = findToggle(flatten(await mod.__render(render)));
@@ -466,10 +475,10 @@ test('已安装的插件有新版本时要给徽章和更新按钮，点了要�
   try {
     const { mod, captured, injected, t } = mount();
     const panel = captured['shell.overlay:market-panel'];
-    const { store } = injected['market-panel'];
+    const { store, updates } = injected['market-panel'];
     store.toggle();
 
-    const render = () => panel({ t, store });
+    const render = () => panel({ t, store, updates });
     const tree = flatten(await mod.__render(render));
     const texts = tree.map((n) => JSON.stringify((n.props && n.props.children) ?? null) ?? '');
     assert.ok(texts.some((x) => x.includes('market.badge.update')), '有更新的插件应该有「有更新」徽章');
@@ -512,10 +521,10 @@ test('卸载只压暗被卸的那一张卡片：面板其余部分照常可用�
   try {
     const { mod, captured, injected, t } = mount();
     const panel = captured['shell.overlay:market-panel'];
-    const { store } = injected['market-panel'];
+    const { store, updates } = injected['market-panel'];
     store.toggle();
 
-    const render = () => panel({ t, store });
+    const render = () => panel({ t, store, updates });
     const findDanger = (tree, title) => tree.filter((n) => n.type === 'button')
       .find((b) => typeof b.props.className === 'string' && b.props.className.includes('dsmkDangerBtn') && b.props.title === title);
     const cardsNamed = (tree, name) => tree.filter((n) => n.props
@@ -611,10 +620,10 @@ test('重启横幅显示的是总改动数——装/卸插件现在也计数了�
     const { mod, captured, injected } = mount();
     const t = (k) => (k === 'market.pending.restart' ? 'PENDING:{n}' : k);
     const panel = captured['shell.overlay:market-panel'];
-    const { store } = injected['market-panel'];
+    const { store, updates } = injected['market-panel'];
     store.toggle();
 
-    const render = () => panel({ t, store });
+    const render = () => panel({ t, store, updates });
     const tree = flatten(await mod.__render(render));
     const updateBtn = tree.filter((n) => n.type === 'button')
       .find((b) => (JSON.stringify(b.props.children ?? null) ?? '').includes('market.detail.updateTo'));
@@ -647,10 +656,10 @@ test('重启横幅跨 tab 都看得见——装/卸插件是在「发现」tab �
   try {
     const { mod, captured, injected, t } = mount();
     const panel = captured['shell.overlay:market-panel'];
-    const { store } = injected['market-panel'];
+    const { store, updates } = injected['market-panel'];
     store.toggle();
 
-    const render = () => panel({ t, store });
+    const render = () => panel({ t, store, updates });
     const tree = flatten(await mod.__render(render));
 
     // 触发一次会点亮横幅的动作：更新已安装的 @easytz/dsh-git（fixture 里带
@@ -686,10 +695,10 @@ test('发现卡片上直接有安装按钮，不用点进详情才能装', async
   try {
     const { mod, captured, injected, t } = mount();
     const panel = captured['shell.overlay:market-panel'];
-    const { store } = injected['market-panel'];
+    const { store, updates } = injected['market-panel'];
     store.toggle();
 
-    const render = () => panel({ t, store });
+    const render = () => panel({ t, store, updates });
     const first = flatten(await mod.__render(render));
     const discoverTabBtn = first.filter((n) => n.type === 'button')
       .find((b) => (JSON.stringify(b.props.children ?? null) ?? '').includes('market.tab.discover'));
@@ -740,10 +749,10 @@ test('在「发现」里装完插件不该重新搜索——重搜会把列表�
   try {
     const { mod, captured, injected, t } = mount();
     const panel = captured['shell.overlay:market-panel'];
-    const { store } = injected['market-panel'];
+    const { store, updates } = injected['market-panel'];
     store.toggle();
 
-    const render = () => panel({ t, store });
+    const render = () => panel({ t, store, updates });
     const first = flatten(await mod.__render(render));
     const discoverTabBtn = first.filter((n) => n.type === 'button')
       .find((b) => (JSON.stringify(b.props.children ?? null) ?? '').includes('market.tab.discover'));
@@ -784,10 +793,10 @@ test('从详情返回时把发现列表滚回原处——不然点进去看一�
   try {
     const { mod, captured, injected, t } = mount();
     const panel = captured['shell.overlay:market-panel'];
-    const { store } = injected['market-panel'];
+    const { store, updates } = injected['market-panel'];
     store.toggle();
 
-    const render = () => panel({ t, store });
+    const render = () => panel({ t, store, updates });
     const first = flatten(await mod.__render(render));
     const discoverTabBtn = first.filter((n) => n.type === 'button')
       .find((b) => (JSON.stringify(b.props.children ?? null) ?? '').includes('market.tab.discover'));
@@ -828,10 +837,10 @@ test('发现卡片上「详情」按钮跟点卡片本身效果一样——展�
   try {
     const { mod, captured, injected, t } = mount();
     const panel = captured['shell.overlay:market-panel'];
-    const { store } = injected['market-panel'];
+    const { store, updates } = injected['market-panel'];
     store.toggle();
 
-    const render = () => panel({ t, store });
+    const render = () => panel({ t, store, updates });
     const first = flatten(await mod.__render(render));
     const discoverTabBtn = first.filter((n) => n.type === 'button')
       .find((b) => (JSON.stringify(b.props.children ?? null) ?? '').includes('market.tab.discover'));
@@ -862,10 +871,10 @@ test('国内镜像开关：默认关，点一下应该乐观翻过去并调用 /
   try {
     const { mod, captured, injected, t } = mount();
     const panel = captured['shell.overlay:market-panel'];
-    const { store } = injected['market-panel'];
+    const { store, updates } = injected['market-panel'];
     store.toggle();
 
-    const render = () => panel({ t, store });
+    const render = () => panel({ t, store, updates });
     const first = flatten(await mod.__render(render));
     const discoverTabBtn = first.filter((n) => n.type === 'button')
       .find((b) => (JSON.stringify(b.props.children ?? null) ?? '').includes('market.tab.discover'));
@@ -898,10 +907,10 @@ test('国内镜像开关：切换之后应该重新搜索——不然列表还�
   try {
     const { mod, captured, injected, t } = mount();
     const panel = captured['shell.overlay:market-panel'];
-    const { store } = injected['market-panel'];
+    const { store, updates } = injected['market-panel'];
     store.toggle();
 
-    const render = () => panel({ t, store });
+    const render = () => panel({ t, store, updates });
     const first = flatten(await mod.__render(render));
     const discoverTabBtn = first.filter((n) => n.type === 'button')
       .find((b) => (JSON.stringify(b.props.children ?? null) ?? '').includes('market.tab.discover'));
@@ -936,10 +945,10 @@ test('搜索框：没打字时不该有清空按钮，打了字之后点「X」�
   try {
     const { mod, captured, injected, t } = mount();
     const panel = captured['shell.overlay:market-panel'];
-    const { store } = injected['market-panel'];
+    const { store, updates } = injected['market-panel'];
     store.toggle();
 
-    const render = () => panel({ t, store });
+    const render = () => panel({ t, store, updates });
     const first = flatten(await mod.__render(render));
     const discoverTabBtn = first.filter((n) => n.type === 'button')
       .find((b) => (JSON.stringify(b.props.children ?? null) ?? '').includes('market.tab.discover'));
@@ -981,9 +990,9 @@ test('面板不依赖任何桌面外壳注入的全局（换个宿主也得能�
     // 那边没有 window.desktop。面板必须照样打得开，「重启应用」按钮不出现而已。
     globalThis.window.desktop = undefined;
     const panel = captured['shell.overlay:market-panel'];
-    const { store } = injected['market-panel'];
+    const { store, updates } = injected['market-panel'];
     store.toggle();
-    await mod.__render(() => panel({ t, store }));
+    await mod.__render(() => panel({ t, store, updates }));
   } finally {
     cleanup();
   }
@@ -1136,10 +1145,10 @@ test('网页版没有重启按钮可点，横幅就得改口说「重启 dsh 进
     const { mod, captured, injected, t } = mount();
     globalThis.window.desktop = undefined;
     const panel = captured['shell.overlay:market-panel'];
-    const { store } = injected['market-panel'];
+    const { store, updates } = injected['market-panel'];
     store.toggle();
 
-    const render = () => panel({ t, store });
+    const render = () => panel({ t, store, updates });
     const first = flatten(await mod.__render(render))
       .find((n) => n.type === 'input' && n.props.type === 'checkbox' && typeof n.props.onChange === 'function');
     assert.ok(first, '可停用的行上应有开关');
@@ -1181,4 +1190,106 @@ test("侧边栏 footer 的纵向排列由本插件自带，不靠别的插件的
 		/\[class\*="footerActions"\]\{[^}]*flex-direction:column/.test(cssSource(CLIENT)),
 		"市场必须自己注入 footerActions 的纵向排列规则"
 	);
+});
+
+/** 树里所有带这个 className 的节点。角标测试反复要用。 */
+function byClass(node, className) {
+  return flatten(node).filter((n) => n.props && n.props.className === className);
+}
+
+test("已安装插件有新版本时，侧边栏「插件市场」右上角要出一个蓝色小叹号", async () => {
+  try {
+    const { captured, injected, t } = mount();
+    const footer = captured["sidebar.footer.action:market"];
+    const { store, updates } = injected.market;
+
+    // 没有更新就**一个点都不该有**。角标常驻（哪怕透明）是最糟的一种：用户会
+    // 学会无视它，真有更新那天也看不见。
+    assert.strictEqual(byClass(footer({ wide: true, t, store, updates }), "dsmkUpdDot").length, 0);
+
+    await updates.refresh();
+    assert.strictEqual(updates.getSnapshot(), 1, "fixture 里只有一个包能升级");
+
+    // 展开态：叹号贴在**文字**的右上角（用户要的就是这个位置），所以它必须落在
+    // 包着文字的那层 wrap 里——落进 .dsmkFooterBtnLabel 会被那个元素的
+    // overflow:hidden 裁掉半个圆。
+    const wide = footer({ wide: true, t, store, updates });
+    const dots = byClass(wide, "dsmkUpdDot");
+    assert.strictEqual(dots.length, 1, "只该有一个角标");
+    // 叹号是画出来的，不是一个「!」字符——字形那一竖在这个尺寸下细到读起来就是
+    // 个圆点。守住「角标里装的是图标组件」，免得哪天又被改回字符。
+    assert.strictEqual(typeof dots[0].props.children.type, "function", "角标里应该是画出来的图标");
+    const labelWrap = byClass(wide, "dsmkFooterBtnLabelWrap")[0];
+    assert.ok(labelWrap, "文字要包一层不裁剪的 wrap");
+    assert.strictEqual(byClass(labelWrap.props.children, "dsmkUpdDot").length, 1, "展开态角标应贴在文字上");
+    assert.strictEqual(byClass(byClass(wide, "dsmkFooterBtnIconWrap")[0].props.children, "dsmkUpdDot").length, 0);
+
+    // 折叠态没有文字可贴，退到图标右上角。
+    const narrow = footer({ wide: false, t, store, updates });
+    const iconWrap = byClass(narrow, "dsmkFooterBtnIconWrap")[0];
+    assert.ok(iconWrap);
+    assert.strictEqual(byClass(iconWrap.props.children, "dsmkUpdDot").length, 1, "折叠态角标应贴在图标上");
+
+    // 圆点自己 aria-hidden，说明得从按钮上读得到——否则读屏用户完全不知道有更新。
+    assert.strictEqual(dots[0].props["aria-hidden"], "true");
+    assert.ok(wide.props["aria-label"].includes("market.updates.hint"));
+    assert.strictEqual(wide.props.title, wide.props["aria-label"]);
+
+    updates.set(0);
+    assert.strictEqual(byClass(footer({ wide: true, t, store, updates }), "dsmkUpdDot").length, 0, "更新装完角标要消失");
+  } finally {
+    cleanup();
+  }
+});
+
+test("角标查不到就保持上一次的数，不能清零——那是在谎报「没有更新」", async () => {
+  try {
+    const { injected } = mount();
+    const { updates } = injected.market;
+    updates.set(3);
+    const online = globalThis.fetch;
+    globalThis.fetch = async () => { throw new Error("offline"); };
+    try {
+      await updates.refresh();
+    } finally {
+      globalThis.fetch = online;
+    }
+    assert.strictEqual(updates.getSnapshot(), 3);
+  } finally {
+    cleanup();
+  }
+});
+
+test("面板拉完 /installed 之后要顺手把角标对齐，不用等下一轮轮询", async () => {
+  try {
+    const { mod, captured, injected, t } = mount();
+    const panel = captured["shell.overlay:market-panel"];
+    const { store, updates } = injected["market-panel"];
+    // 先塞一个明显不对的数：如果面板没有回喂，这个数会原样留着。
+    updates.set(9);
+    store.toggle();
+    await mod.__render(() => panel({ t, store, updates }));
+    assert.strictEqual(updates.getSnapshot(), 1, "/installed 里只有一个 updateAvailable");
+  } finally {
+    cleanup();
+  }
+});
+
+test("角标轮询挂在 apply 上，插件卸载时要把定时器清掉", () => {
+  try {
+    const mod = loadModule();
+    const disposers = [];
+    const ctx = {
+      effect: (fn) => { const d = fn(); if (typeof d === "function") disposers.push(d); return () => {}; },
+      locale: { register() {} },
+      slots: { inject: (key, cb) => { cb(); return () => {}; }, register: () => () => {} },
+    };
+    mod.apply(ctx);
+    // effect 真跑了就一定留下了一个 setInterval —— 不清掉，插件热重载一次就多一路
+    // 轮询，几次之后就是在拿 npm registry 当靶子。
+    assert.ok(disposers.length > 0, "轮询 effect 应返回一个 teardown");
+    for (const dispose of disposers) dispose();
+  } finally {
+    cleanup();
+  }
 });
