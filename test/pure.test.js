@@ -6,7 +6,7 @@ import test from "node:test";
 import {
   buildSearchText, filterTaggedIndex, githubSlug, installability, isExactVersion, isValidPackageName,
   applyDownloads, extractImages, formatDownloads, imageCandidates, isBadgeUrl,
-  normalizeDownloads, resolveImageUrl,
+  mergeDownloads, normalizeDownloads, resolveImageUrl,
   normalizeInstalled, normalizeManifest, normalizeMirror, normalizeSearchHits, packageUrlPath,
   paginateTagged, planSettingsUpdate, tailLines,
   compareVersions, isUpdateAvailable
@@ -494,4 +494,24 @@ test("isUpdateAvailable: 已装版本旧才算有更新，一样新/更新/解�
   assert.equal(isUpdateAvailable("0.3.0", "0.2.0"), false);
   assert.equal(isUpdateAvailable("weird", "0.2.0"), false);
   assert.equal(isUpdateAvailable(null, null), false);
+});
+
+test("mergeDownloads: 只并数字不排序，也不会把已有的数字擦成 null", () => {
+  // 全局排好之后这一页只是要把数字填上——再排一次就是拿这一页重新洗牌。
+  const items = [
+    { name: "b", downloads: 5 },
+    { name: "a", downloads: 100 },
+    { name: "c", downloads: 1 }
+  ];
+  const merged = mergeDownloads(items, { a: 100, c: 1 });
+  assert.deepEqual(merged.map((item) => item.name), ["b", "a", "c"], "顺序原样保留");
+  // b 这次没查到（限流、缓存被挤掉）——保留它已有的数字，不能变成「卡片上的下载量
+  // 凭空消失」。
+  assert.equal(merged[0].downloads, 5);
+  assert.equal(merged[1].downloads, 100);
+});
+
+test("mergeDownloads: 本来就没数字、这次也没查到，才是 null", () => {
+  const merged = mergeDownloads([{ name: "x" }], {});
+  assert.equal(merged[0].downloads, null);
 });
