@@ -87,6 +87,20 @@ function fakeElement() {
   return { scrollTop: 0, scrollHeight: 5000, clientHeight: 500, contains: () => false };
 }
 
+/**
+ * 一个真的会存东西的 sessionStorage。挂在模块作用域而不是 loadModule 里：热重载
+ * 换掉插件时，页面并没有刷新，sessionStorage 也就不会跟着没——测试要保住这个前提。
+ */
+const sessionStore = (() => {
+  const map = new Map();
+  return {
+    getItem: (key) => (map.has(key) ? map.get(key) : null),
+    setItem: (key, value) => { map.set(key, String(value)); },
+    removeItem: (key) => { map.delete(key); },
+    clear: () => map.clear(),
+  };
+})();
+
 function loadModule() {
   const src = fs.readFileSync(CLIENT, 'utf8');
   const registrations = [];
@@ -110,6 +124,11 @@ function loadModule() {
       removeEventListener() {},
     },
     localStorage: { getItem: () => null, setItem() {} },
+    // sessionStorage 要**真的能存**：市场更新自己那一次靠它把「等会儿要显示什么」
+    // 交给热重载之后的下一条命（见 client.js 里 SELF_UPDATE_KEY 的注释），存成空
+    // 操作的话那条路径的两头都测不出来。跨 loadModule 保留，正是为了模拟「同一个
+    // 页面里，插件被换掉又重新 apply」。
+    sessionStorage: sessionStore,
     // 按路由给出**真实形状**的数据。给统一的空 `{}` 等于让列表永远是空的，
     // 分组那棵树照样不执行 —— 和 effect 不跑是同一种自欺。
     //
@@ -135,6 +154,11 @@ function loadModule() {
         { name: '@deepseek-ai/dsh-base', version: '0.1.0', removable: false, canDisable: false, entryIds: [], enabled: true },
         // 带一个「有更新」的，好让更新徽章/按钮、以及侧边栏那个小叹号都真的跑一遍。
         { name: '@easytz/dsh-git', version: '0.5.0', removable: true, canDisable: true, entryIds: ['dsdesktop-git'], enabled: true, installedVersion: '0.5.0', latestVersion: '0.6.0', updateAvailable: true },
+        // 市场自己，也带一个「有更新」——「更新市场自己」是唯一会把面板从脚下抽走的
+        // 那条路（内核的 client-hmr 会把这个插件热换掉，见 client.js 里 SELF_UPDATE_KEY
+        // 的注释），没有这一行就测不了它。canDisable 为 false：它在 dsDesktop 里能卸
+        // 但不能停用。
+        { name: '@easytz/dsh-market', version: '1.3.0', removable: true, canDisable: false, entryIds: ['dsdesktop-market'], enabled: true, installedVersion: '1.3.0', latestVersion: '1.3.1', updateAvailable: true },
         { name: 'cost-meter', version: '1.0.0', removable: true, canDisable: true, entryIds: ['cost-meter'], enabled: false },
       ]);
       // 这个假 React 的 effect 不认依赖数组、每一轮都会重跑（见下面 __render 的
@@ -350,9 +374,12 @@ function loadModule() {
   return mod;
 }
 
-const cleanup = () => Object.assign(globalThis, {
-  window: undefined, document: undefined, localStorage: undefined, fetch: undefined,
-});
+const cleanup = () => {
+  sessionStore.clear();
+  Object.assign(globalThis, {
+    window: undefined, document: undefined, localStorage: undefined, sessionStorage: undefined, fetch: undefined,
+  });
+};
 
 /** 装好插件，拿到注册进两个槽的组件。 */
 function mount() {
@@ -483,8 +510,12 @@ test('已安装的插件有新版本时要给徽章和更新按钮，点了要�
     const texts = tree.map((n) => JSON.stringify((n.props && n.props.children) ?? null) ?? '');
     assert.ok(texts.some((x) => x.includes('market.badge.update')), '有更新的插件应该有「有更新」徽章');
 
-    const updateBtn = tree.filter((n) => n.type === 'button')
-      .find((b) => (JSON.stringify(b.props.children ?? null) ?? '').includes('market.detail.updateTo'));
+    // 按 title 认卡片：fixture 里不止一个包有新版本（市场自己也有），不指名道姓
+    // 就会点到别人家的按钮，下面「更新完成后不该再闪现按钮」也会被别人的按钮顶掉。
+    const updateBtnOf = (nodes, name) => nodes.filter((n) => n.type === 'button')
+      .find((b) => (JSON.stringify(b.props.children ?? null) ?? '').includes('market.detail.updateTo')
+        && b.props.title === name);
+    const updateBtn = updateBtnOf(tree, '@easytz/dsh-git');
     assert.ok(updateBtn, '应该有「更新到」按钮');
     // 只调这一个按钮的处理器，不用 fireAll——同样是为了不把关闭/tab 按钮也点了。
     updateBtn.props.onClick();
@@ -501,11 +532,89 @@ test('已安装的插件有新版本时要给徽章和更新按钮，点了要�
     assert.strictEqual(restartButtons.length, 1, '重启按钮应该只出现一次（共用横幅里），不该每张卡片各配一个');
     // /installed 刷新回来之前，列表里的 installedVersion 还是旧值，更新按钮不能借这个
     // 窗口再闪一下；更新完成后应该只留结果提示。
-    const afterUpdateBtn = after.filter((n) => n.type === 'button')
-      .find((b) => (JSON.stringify(b.props.children ?? null) ?? '').includes('market.detail.updateTo'));
-    assert.strictEqual(afterUpdateBtn, undefined, '更新完成后不该再闪现「更新到」按钮');
+    assert.strictEqual(updateBtnOf(after, '@easytz/dsh-git'), undefined, '更新完成后不该再闪现「更新到」按钮');
     const afterTexts = after.map((n) => JSON.stringify((n.props && n.props.children) ?? null) ?? '');
     assert.ok(afterTexts.some((x) => x.includes('market.pending.restart')), '更新成功后应该点亮共用的「重启后生效」横幅');
+  } finally {
+    cleanup();
+  }
+});
+
+test('市场更新自己：面板会被内核热换掉，重启提示必须靠 sessionStorage 活过那一次', async () => {
+  // 这条测的是一个真实故障，而且是**看不见的**那种：
+  //
+  // dsh 内核里的 `@deepseek-ai/dsh-client-hmr` 每 500ms stat 一遍每个插件的
+  // client.js，内容一变就推一帧 `rebuilt`，浏览器半收到后把那个插件的 fiber
+  // dispose 掉、拿新 bundle 重新 apply。更新别的插件没事；更新**市场自己**时，
+  // 被销毁的正是那个刚刚显示出「更新成功」的面板 —— 用户看到的是「点完更新，
+  // 面板闪了一下就没了，也没提示重启」，而更新其实是成功的。
+  //
+  // 拦不住那次热换，所以改成「先把话写下来」：点更新之前先写 sessionStorage，
+  // 热换之后的新一条命读回来，把面板重新打开、把横幅接上。
+  //
+  // 下面就按这个顺序演一遍：老的一条命点更新 → 丢掉它 → 重新 apply（模拟热换）
+  // → 新的一条命必须自己开着，并且横幅还在。
+  try {
+    const first = mount();
+    const store1 = first.injected['market-panel'].store;
+    store1.toggle();
+    const tree = flatten(await first.mod.__render(() => first.captured['shell.overlay:market-panel']({
+      t: first.t, store: store1, updates: first.injected['market-panel'].updates
+    })));
+    const selfBtn = tree.filter((n) => n.type === 'button')
+      .find((b) => (JSON.stringify(b.props.children ?? null) ?? '').includes('market.detail.updateTo')
+        && b.props.title === '@easytz/dsh-market');
+    assert.ok(selfBtn, '市场自己也该有「更新到」按钮（它现在和别的插件一样能更新）');
+    selfBtn.props.onClick();
+    await new Promise((r) => setTimeout(r, 0));
+
+    // 字条要在**请求发出前**就写好：真实环境里 pnpm 写完文件到 HMR 把面板换掉，
+    // 中间只有半秒，等响应回来再写就可能来不及。
+    const note = JSON.parse(sessionStore.getItem('dsmk:self-update'));
+    assert.strictEqual(note.name, '@easytz/dsh-market');
+    assert.strictEqual(note.version, '1.3.1', '版本号只有点按钮那一刻的卡片知道，必须一起带上');
+    assert.ok(note.n >= 1, '「有几项改动没生效」也要一起交班，不能从 0 重来');
+  } finally {
+    // 只清全局，**不清 sessionStore** —— 热重载不会刷新页面，那份存储是活着的。
+    Object.assign(globalThis, { window: undefined, document: undefined, localStorage: undefined, fetch: undefined });
+  }
+
+  try {
+    // 热换之后的新一条命：同一份 sessionStorage，全新的模块与 store。
+    const second = mount();
+    const { store, updates } = second.injected['market-panel'];
+    assert.strictEqual(store.getSnapshot(), true, '被自己的更新换掉之后，面板要自己开回来，而不是就这么没了');
+    const after = flatten(await second.mod.__render(() => second.captured['shell.overlay:market-panel']({
+      t: second.t, store, updates
+    })));
+    const texts = after.map((n) => JSON.stringify((n.props && n.props.children) ?? null) ?? '');
+    assert.ok(texts.some((x) => x.includes('market.pending.restart')), '「重启后生效」的横幅要接着显示');
+    assert.ok(texts.some((x) => x.includes('market.detail.needRestart')), '「已装好 x@y」那行结果也要接上');
+
+    // 点重启就把字条擦掉：重启之后那些改动已经生效，横幅不该还挂着。
+    const restartBtn = after.filter((n) => n.type === 'button')
+      .find((b) => (JSON.stringify(b.props.children ?? null) ?? '').includes('market.detail.restart'));
+    assert.ok(restartBtn, '桌面外壳在，就该有重启按钮');
+    restartBtn.props.onClick();
+    assert.strictEqual(sessionStore.getItem('dsmk:self-update'), null, '重启之后不该再留着那条字条');
+  } finally {
+    cleanup();
+  }
+});
+
+test('更新别的插件不写那条字条：只有「市场更新自己」才会把面板从脚下抽走', async () => {
+  try {
+    const { mod, captured, injected, t } = mount();
+    const { store, updates } = injected['market-panel'];
+    store.toggle();
+    const tree = flatten(await mod.__render(() => captured['shell.overlay:market-panel']({ t, store, updates })));
+    const btn = tree.filter((n) => n.type === 'button')
+      .find((b) => (JSON.stringify(b.props.children ?? null) ?? '').includes('market.detail.updateTo')
+        && b.props.title === '@easytz/dsh-git');
+    btn.props.onClick();
+    await new Promise((r) => setTimeout(r, 0));
+    assert.strictEqual(sessionStore.getItem('dsmk:self-update'), null,
+      '更新别的插件时面板不会被换掉，结果条和横幅正常显示，不需要也不该留下这条记录');
   } finally {
     cleanup();
   }
@@ -738,6 +847,91 @@ test('发现卡片上直接有安装按钮，不用点进详情才能装', async
       !after.some((n) => typeof n.props.className === 'string' && n.props.className.includes('dsmkBackBtn')),
       '点安装按钮不该顺带展开详情——两者是独立操作'
     );
+  } finally {
+    cleanup();
+  }
+});
+
+test('发现卡片上的日期要写明是「更新于」，并且和下载量在同一行', async () => {
+  // 卡片上原来单独占一行画一个裸日期（`2026-01-01`）。它其实是 npm 搜索结果里的
+  // date，也就是**这个包最后一次发版**的时间——但光一个日期，用户可以理解成
+  // 「我装它的时间」「我上次更新它的时间」，三种读法都说得通。写清楚，并挪到
+  // 下载量旁边（同一行两个数字，都是"这个包怎么样"的旁证）。
+  try {
+    const { mod, captured, injected, t } = mount();
+    const panel = captured['shell.overlay:market-panel'];
+    const { store, updates } = injected['market-panel'];
+    store.toggle();
+    const render = () => panel({ t, store, updates });
+    const first = flatten(await mod.__render(render));
+    first.filter((n) => n.type === 'button')
+      .find((b) => (JSON.stringify(b.props.children ?? null) ?? '').includes('market.tab.discover'))
+      .props.onClick();
+
+    const onDiscover = flatten(await mod.__render(render));
+    const metaLine = onDiscover.find((n) => n.props.className === 'dsmkCardMetaLine');
+    assert.ok(metaLine, '卡片底部应该有一条元信息行');
+    const inLine = JSON.stringify(flatten(metaLine.props.children).map((n) => n.props.children));
+    assert.ok(inLine.includes('market.meta.updated'), '日期要带「更新于」的说明，不能是一个裸日期');
+    assert.ok(inLine.includes('market.meta.downloadsWeek'), '下载量应该和日期在同一行');
+    // 老的那一行（单独一个 dsmkCardMeta）不该再出现在卡片里。
+    assert.ok(!onDiscover.some((n) => n.props.className === 'dsmkCardMeta'
+      && JSON.stringify(n.props.children ?? null).includes('2026-01-01')),
+      '不该再单独画一行裸日期');
+  } finally {
+    cleanup();
+  }
+});
+
+test('内核还是旧的 /preview 路由不存在时，缩略图要退回 /detail 而不是留一片空白', async () => {
+  // 这是这个插件的**常态窗口期**，不是边角情况：市场更新自己时，内核的 client-hmr
+  // 只换客户端半，node 半要等重启才是新的。也就是「新客户端跑在旧服务端上」——
+  // 新加的路由必然 404。真机上就是这么撞到的：更新完卡片上的缩略图整片空白，
+  // 而用户刚更新完，只会以为新版本坏了。
+  try {
+    const { mod } = mount();
+    const { fetchPreviewSrc, previewCache } = mod.__test__;
+    previewCache.clear();
+    const seen = [];
+    globalThis.fetch = async (url) => {
+      seen.push(String(url));
+      // 旧内核对没注册的路由回的是 text/plain 的 "not found"，res.json() 会抛。
+      if (String(url).includes('/preview')) return { ok: false, json: async () => { throw new SyntaxError('not json'); } };
+      if (String(url).includes('/detail')) {
+        return { ok: true, json: async () => ({ ok: true, data: { images: [{ src: '/api/dsdesktop/market/image?name=x&i=0&v=1.0.0', alt: '' }] } }) };
+      }
+      return { ok: true, json: async () => ({ ok: true, data: {} }) };
+    };
+
+    const src = await fetchPreviewSrc({ name: 'x', github: null });
+    assert.equal(src, '/api/dsdesktop/market/image?name=x&i=0&v=1.0.0', '/preview 不在就该退回 /detail 取第一张图');
+    assert.ok(seen.some((u) => u.includes('/preview')), '第一次仍然先试新路由');
+
+    // 撞过一次就整场都走 /detail，不必每张卡片各撞一次 404。
+    seen.length = 0;
+    await fetchPreviewSrc({ name: 'y', github: null });
+    assert.ok(!seen.some((u) => u.includes('/preview')), '已知路由不在，之后不该再试');
+    assert.ok(seen.some((u) => u.includes('/detail')), '之后直接走 /detail');
+  } finally {
+    cleanup();
+  }
+});
+
+test('/preview 正常回「这个包没有图」时不能被当成路由不存在', async () => {
+  // `{ok:true, data:{src:null}}` 是**答案**（README 里确实没有图），不是缺路由。
+  // 分不清这两者的话，第一个没有截图的包就会把整场都拖去走更贵的 /detail。
+  try {
+    const { mod } = mount();
+    const { fetchPreviewSrc, previewCache } = mod.__test__;
+    previewCache.clear();
+    const seen = [];
+    globalThis.fetch = async (url) => {
+      seen.push(String(url));
+      return { ok: true, json: async () => ({ ok: true, data: { src: null } }) };
+    };
+    assert.equal(await fetchPreviewSrc({ name: 'no-shot', github: null }), null);
+    await fetchPreviewSrc({ name: 'another', github: null });
+    assert.ok(!seen.some((u) => u.includes('/detail')), '不该因为一个包没有图就退回 /detail');
   } finally {
     cleanup();
   }
@@ -1213,7 +1407,7 @@ test("已安装插件有新版本时，侧边栏「插件市场」右上角要�
     assert.strictEqual(byClass(footer({ wide: true, t, store, updates }), "dsmkUpdDot").length, 0);
 
     await updates.refresh();
-    assert.strictEqual(updates.getSnapshot(), 1, "fixture 里只有一个包能升级");
+    assert.strictEqual(updates.getSnapshot(), 2, "fixture 里有两个包能升级");
 
     // 展开态：叹号贴在**文字**的右上角（用户要的就是这个位置），所以它必须落在
     // 包着文字的那层 wrap 里——落进 .dsmkFooterBtnLabel 会被那个元素的
@@ -1274,7 +1468,7 @@ test("面板拉完 /installed 之后要顺手把角标对齐，不用等下一�
     updates.set(9);
     store.toggle();
     await mod.__render(() => panel({ t, store, updates }));
-    assert.strictEqual(updates.getSnapshot(), 1, "/installed 里只有一个 updateAvailable");
+    assert.strictEqual(updates.getSnapshot(), 2, "/installed 里有两个 updateAvailable");
   } finally {
     cleanup();
   }
