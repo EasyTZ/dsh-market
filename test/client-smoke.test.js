@@ -499,6 +499,11 @@ test('已安装的插件有新版本时要给徽章和更新按钮，点了要�
     const restartButtons = after.filter((n) => n.type === 'button')
       .filter((b) => (JSON.stringify(b.props.children ?? null) ?? '').includes('market.detail.restart'));
     assert.strictEqual(restartButtons.length, 1, '重启按钮应该只出现一次（共用横幅里），不该每张卡片各配一个');
+    // /installed 刷新回来之前，列表里的 installedVersion 还是旧值，更新按钮不能借这个
+    // 窗口再闪一下；更新完成后应该只留结果提示。
+    const afterUpdateBtn = after.filter((n) => n.type === 'button')
+      .find((b) => (JSON.stringify(b.props.children ?? null) ?? '').includes('market.detail.updateTo'));
+    assert.strictEqual(afterUpdateBtn, undefined, '更新完成后不该再闪现「更新到」按钮');
     const afterTexts = after.map((n) => JSON.stringify((n.props && n.props.children) ?? null) ?? '');
     assert.ok(afterTexts.some((x) => x.includes('market.pending.restart')), '更新成功后应该点亮共用的「重启后生效」横幅');
   } finally {
