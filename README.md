@@ -9,6 +9,9 @@
 
 > 目录里出现或显示为可安装，不代表经过安全审核或推荐。插件装上之后是以你的用户权限运行的本地代码。
 
+<details open>
+<summary><b>中文</b></summary>
+
 ## 前置要求
 
 - dsh `>= 0.1.1-rc.2`
@@ -26,7 +29,7 @@ dsh plugin --profile <name> add @easytz/dsh-market
 - TUI 界面通常叫 `tui`
 - 不确定时看 `$DSH_HOME/profiles/` 下的目录名，或运行 `dsh --profile <name> --help` 确认
 
-省略 `--profile <name>` 会直接报错：`error: --profile <name> is required`，所以**不加名字不会安装成功**。想钉死版本就写 `@easytz/dsh-market@1.4.0`。
+省略 `--profile <name>` 会直接报错：`error: --profile <name> is required`，所以**不加名字不会安装成功**。想钉死版本就写 `@easytz/dsh-market@1.5.0`。
 
 安装后重启 dsh，侧边栏底部会出现「插件市场」按钮。
 
@@ -50,9 +53,21 @@ dsh plugin --profile <name> add @easytz/dsh-market
 |---|---|
 | 桌面自带 | 宿主内置的产品包，卸不掉也停不了 |
 | 随应用分发但当前没装 | 一个「装回来」按钮，用宿主随包带的副本，离线可用 |
-| 从市场安装 | 停用 / 启用、卸载、有新版本时一键更新 |
+| 从市场安装 | 停用 / 启用、卸载、有新版本时更新到最新版 |
 
 停用和装卸都要**重启内核后生效**，面板底部会显示「有 n 项改动，重启后生效」和一个重启按钮。
+
+### 一键更新
+
+「已安装」页签右上角常驻一个绿色的**一键更新**按钮，标着有几个插件能升级，点一下把它们全部更新到各自的最新版。旁边那行字在跑完之后会变成结果（更新了几个 / 哪几个没成功）。
+
+一个都不能升的时候按钮**不会消失**，只是禁用并写着「已全部更新」—— 一个说明不了自己为什么不在的控件，只会让人怀疑功能是不是坏了。
+
+三条不太显眼但很要紧的规则：
+
+- **串行，不并发。** 服务端一次只允许一个 pnpm 在跑（并发会踩同一份 lockfile），所以整批是一个接一个跑的，按钮上显示 `更新中 2/5…`。
+- **插件市场自己排在最后。** 更新它会让内核的热重载在半秒内把这个面板连根换掉；排在中间的话，后面几个包的请求压根没人去发 —— 点的是「一键更新」，实际只更新了前半截。
+- **中间失败不中断。** 一个包发布得有问题（或者刚好被下架）不该把剩下几个也拦住，失败的名字攒到最后一起报，按钮留着让你再点一次。
 
 ### 更新角标
 
@@ -156,9 +171,10 @@ dsh plugin --profile <name> remove @easytz/dsh-market
 - 所有路由过统一的 Origin + Content-Type 检查（本服务从不发 CORS 头，但那只挡读取、不挡发送）。
 - 包名在进入任何 URL 或命令行之前先过 `isValidPackageName`：小写、可带一层 scope、不以 `.` `_` `-` 开头。**禁掉 `-` 开头**是我们额外加的一条——`-g`、`--force` 整串都由合法包名字符组成，能通过 npm 自己的校验，然后被 pnpm 当作参数而不是包名吃掉。
 
----
+</details>
 
-## English
+<details>
+<summary><b>English</b></summary>
 
 A third-party plugin for [DeepSeek Harness](https://github.com/deepseek-ai/deepseek-harness) (dsh): a **plugin market** in the sidebar. Browse and search dsh plugins on npm, read the details, install into the current profile, and manage what you already have.
 
@@ -175,7 +191,7 @@ A third-party plugin for [DeepSeek Harness](https://github.com/deepseek-ai/deeps
 dsh plugin --profile <name> add @easytz/dsh-market
 ```
 
-`<name>` is **required** — your dsh profile (usually `web` for the desktop/web UI, `tui` for the TUI). Omitting it fails with `error: --profile <name> is required`. Pin a version with `@easytz/dsh-market@1.4.0` if you want reproducibility.
+`<name>` is **required** — your dsh profile (usually `web` for the desktop/web UI, `tui` for the TUI). Omitting it fails with `error: --profile <name> is required`. Pin a version with `@easytz/dsh-market@1.5.0` if you want reproducibility.
 
 Restart dsh — a **Plugin Market** button appears at the bottom of the sidebar.
 
@@ -206,6 +222,8 @@ The first image in your README becomes the card thumbnail. Three steps:
 3. Add `"docs"` to `files` in `package.json` — **the step people miss.** If the screenshot isn't in the published tarball, the jsDelivr candidate 404s and only GitHub raw is left, which times out on many networks.
 
 The thumbnail area is roughly 390×104 with `object-fit: cover`, so wide screenshots work best. Images are read from the README in the npm packument, so you have to publish for them to appear.
+
+</details>
 
 ## 许可证 / License
 

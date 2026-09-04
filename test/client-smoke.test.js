@@ -108,6 +108,17 @@ function loadModule() {
   // 记下每次 fetch 打了哪条路由，供测试断言「点了这个按钮真的发出了那个请求」——
   // 光断言「调用处理器不抛」抓不住「处理器把回调接错、变成空操作」这类问题。
   const fetchCalls = [];
+  // 装了哪些包、按什么顺序装的。「一键更新」的核心承诺之一是**市场自己排在最后**
+  // （更新它会把面板热换掉，排在中间的话后面几个压根没人去发请求），只看
+  // fetchCalls 里有几条 `/install POST` 是验不出顺序的。
+  const installBodies = [];
+  // 让某个包的 /install 失败。一键更新「中间失败不中断、最后一起报」这条路径，
+  // 没有它就只能靠全成功的快乐路径想象。
+  const failInstall = new Set();
+  // 让 /installed 里一个可升级的都没有。这是**实机上最常见的那种状态**（本机插件
+  // 恰好全是最新版），而第一版「有更新才画那一条」正是在这种状态下什么都不显示，
+  // 用户无从判断是「没有更新」还是「功能没生效」。默认关，要测的用例自己打开。
+  const noUpdates = { on: false };
   Object.assign(globalThis, {
     window: {
       __ModuleLoader__: { load(reg) { registrations.push(reg); } },
@@ -160,6 +171,10 @@ function loadModule() {
         // 但不能停用。
         { name: '@easytz/dsh-market', version: '1.3.0', removable: true, canDisable: false, entryIds: ['dsdesktop-market'], enabled: true, installedVersion: '1.3.0', latestVersion: '1.3.1', updateAvailable: true },
         { name: 'cost-meter', version: '1.0.0', removable: true, canDisable: true, entryIds: ['cost-meter'], enabled: false },
+        // 名字排在市场自己**后面**、而且也有新版本的一个。看着可有可无，其实是
+        // 「一键更新把市场排到最后」那条断言唯一的支点：只有 dsh-git 和市场两个的话，
+        // 字母序本来就是「市场在后」，把重排整段删掉测试照样全绿（验证过）。
+        { name: 'zeta-lab', version: '1.0.0', removable: true, canDisable: true, entryIds: ['zeta-lab'], enabled: true, installedVersion: '1.0.0', latestVersion: '1.1.0', updateAvailable: true },
       ]);
       // 这个假 React 的 effect 不认依赖数组、每一轮都会重跑（见下面 __render 的
       // 注释），/capabilities 的 fetch 因此会被反复重新发起。/settings/save 存了
@@ -188,6 +203,10 @@ function loadModule() {
           }
           if (String(url).endsWith('/install')) {
             const body = JSON.parse(init.body);
+            installBodies.push(body);
+            if (failInstall.has(body.name)) {
+              return { ok: false, error: { code: 'pnpm-failed', message: '包管理器执行失败', output: 'boom' } };
+            }
             return { ok: true, data: { name: body.name, version: body.version || '2.0.0', drifted: false, output: '' } };
           }
           if (String(url).includes('/detail?')) {
@@ -209,6 +228,9 @@ function loadModule() {
           if (String(url).endsWith('/installed')) {
             const items = fixture()
               .filter((item) => !uninstalledNames.has(item.name))
+              .map((item) => (noUpdates.on
+                ? { ...item, latestVersion: item.installedVersion ?? null, updateAvailable: false }
+                : item))
               .map((item) => (
                 item.name in enabledOverrides ? { ...item, enabled: enabledOverrides[item.name] } : item
               ));
@@ -371,6 +393,9 @@ function loadModule() {
   const mod = registrations[0].factory(fakeRequire);
   mod.__render = reactHooks.__render;
   mod.__fetchCalls = fetchCalls;
+  mod.__installBodies = installBodies;
+  mod.__failInstall = failInstall;
+  mod.__noUpdates = noUpdates;
   return mod;
 }
 
@@ -615,6 +640,129 @@ test('更新别的插件不写那条字条：只有「市场更新自己」才�
     await new Promise((r) => setTimeout(r, 0));
     assert.strictEqual(sessionStore.getItem('dsmk:self-update'), null,
       '更新别的插件时面板不会被换掉，结果条和横幅正常显示，不需要也不该留下这条记录');
+  } finally {
+    cleanup();
+  }
+});
+
+/** 一键更新是好几次请求串起来的，一个 setTimeout(0) 排不完。 */
+async function settle(rounds = 12) {
+  for (let i = 0; i < rounds; i += 1) {
+    // eslint-disable-next-line no-await-in-loop
+    await new Promise((r) => setTimeout(r, 0));
+  }
+}
+
+test('一键更新：所有有新版本的插件依次更新，市场自己排在最后', async () => {
+  // 顺序不是细节。更新市场自己会让内核的 client-hmr 在半秒内把这个面板连根换掉
+  // （见 client.js 里 SELF_UPDATE_KEY 的注释）——它要是排在中间，后面那几个包的
+  // 请求压根没人去发：用户点的是「一键更新」，实际只更新了前半截，还没有任何提示。
+  try {
+    const { mod, captured, injected, t } = mount();
+    const { store, updates } = injected['market-panel'];
+    store.toggle();
+    const render = () => captured['shell.overlay:market-panel']({ t, store, updates });
+    const tree = flatten(await mod.__render(render));
+
+    const bar = tree.find((n) => n.props && n.props.className === 'dsmkUpdateAllBar');
+    assert.ok(bar, '「已安装」tab 顶上应该有一键更新那一条');
+    const btn = flatten(bar).filter((n) => n.type === 'button')
+      .find((b) => (JSON.stringify(b.props.children ?? null) ?? '').includes('market.updateAll'));
+    assert.ok(btn, '应该有「一键更新」按钮');
+
+    // 它必须在滚动区**外面**：跟着列表一起滚走的批量入口，插件一多就等于没有。
+    const body = tree.find((n) => n.props && n.props.className === 'dsmkBody');
+    assert.ok(body, '前提：面板有滚动区');
+    assert.ok(!flatten(body).includes(btn), '一键更新按钮不该待在会滚走的列表里');
+
+    btn.props.onClick();
+    await settle();
+
+    // fixture 里有三个包有新版本，字母序是 dsh-git → 市场 → zeta-lab；市场必须被
+    // 挪到最后，zeta-lab 排到它前面去。
+    assert.deepStrictEqual(mod.__installBodies.map((b) => b.name),
+      ['@easytz/dsh-git', 'zeta-lab', '@easytz/dsh-market'],
+      '三个都要更新，而且市场自己必须排在最后');
+    assert.deepStrictEqual(mod.__installBodies.map((b) => b.version), ['0.6.0', '1.1.0', '1.3.1'],
+      '装的是各自 npm 上的 latest，不是随手一个版本');
+
+    // 「有几项改动没生效」要把这一批里已经跑成功的算进去：热换之后接班的那条命
+    // 只有这张字条可读，写死 1 的话前面几个包就从计数里凭空消失了。
+    const note = JSON.parse(sessionStore.getItem('dsmk:self-update'));
+    assert.strictEqual(note.n, 3, '市场自己是第三个跑的，交班的计数就该是 3');
+
+    const after = flatten(await mod.__render(render));
+    const texts = after.map((n) => JSON.stringify((n.props && n.props.children) ?? null) ?? '');
+    assert.ok(texts.some((x) => x.includes('market.updateAll.done')), '跑完要报「更新了几个」');
+    // /installed 还是那份老 fixture（更新前后都写着「有更新」），这个窗口里按钮
+    // 不能带着原来的数字再亮一次——那看着就是「点了没生效」。按钮本身要留在原位，
+    // 只是变成禁用的「已全部更新」。
+    const again = after.filter((n) => n.type === 'button')
+      .find((b) => (b.props.className || '').includes('dsmkOkBtn'));
+    assert.ok(again, '按钮要一直待在右上角，不能跑完就消失');
+    assert.strictEqual(again.props.children, 'market.updateAll.upToDate', '没得可升了就该写「已全部更新」');
+    assert.strictEqual(again.props.disabled, true, '没得可升的按钮要禁用');
+  } finally {
+    cleanup();
+  }
+});
+
+test('一键更新中间有一个失败：剩下的照跑完，最后一起报出来', async () => {
+  // 几个插件之间没有依赖关系，一个包发布得有问题（或者刚好被下架）不该把剩下几个
+  // 也拦住——那样用户得一个个手动点过去，一键更新就白做了。
+  try {
+    const { mod, captured, injected, t } = mount();
+    mod.__failInstall.add('@easytz/dsh-git');
+    const { store, updates } = injected['market-panel'];
+    store.toggle();
+    const render = () => captured['shell.overlay:market-panel']({ t, store, updates });
+    const tree = flatten(await mod.__render(render));
+    const btn = tree.filter((n) => n.type === 'button')
+      .find((b) => (JSON.stringify(b.props.children ?? null) ?? '').includes('market.updateAll'));
+    btn.props.onClick();
+    await settle();
+
+    assert.deepStrictEqual(mod.__installBodies.map((b) => b.name),
+      ['@easytz/dsh-git', 'zeta-lab', '@easytz/dsh-market'],
+      '第一个失败了，后面两个也要照跑');
+
+    const after = flatten(await mod.__render(render));
+    const texts = after.map((n) => JSON.stringify((n.props && n.props.children) ?? null) ?? '');
+    assert.ok(texts.some((x) => x.includes('market.updateAll.failed')), '失败的要报出来');
+    assert.ok(texts.some((x) => x.includes('@easytz/dsh-git')), '报哪个失败了，不能只给个数字');
+    // 没成的那个仍然可更新，按钮要留着让用户再试一次。
+    const retry = after.filter((n) => n.type === 'button')
+      .find((b) => (JSON.stringify(b.props.children ?? null) ?? '').includes('market.updateAll'));
+    assert.ok(retry, '还有没更新成功的，按钮就该留着');
+  } finally {
+    cleanup();
+  }
+});
+
+test('一个都不能升的时候，一键更新按钮照样在原位，只是禁用并写着「已全部更新」', async () => {
+  // 这条守的是一个真实反馈：改完之后本机 5 个插件恰好全是最新版，用户打开面板
+  // 什么都没看到，报「没有这个按钮」。一个说明不了自己为什么不在的控件，等于把
+  // 排查成本丢给用户——所以它常驻，用文案说清楚「不是坏了，是没得可升」。
+  try {
+    const { mod, captured, injected, t } = mount();
+    mod.__noUpdates.on = true;
+    const { store, updates } = injected['market-panel'];
+    store.toggle();
+    const tree = flatten(await mod.__render(() => captured['shell.overlay:market-panel']({ t, store, updates })));
+
+    const bar = tree.find((n) => n.props && n.props.className === 'dsmkUpdateAllBar');
+    assert.ok(bar, '一个都不能升也要画这一条，不能整条消失');
+    const btn = flatten(bar).find((n) => n.type === 'button');
+    assert.ok(btn, '按钮要在');
+    assert.strictEqual(btn.props.children, 'market.updateAll.upToDate');
+    assert.strictEqual(btn.props.disabled, true, '点了也没事可做，就该是禁用的');
+
+    // 点下去不能真的发请求（禁用只是视觉，处理器还挂在上面）。
+    const before = mod.__fetchCalls.length;
+    btn.props.onClick();
+    await settle(3);
+    assert.strictEqual(mod.__installBodies.length, 0, '没有可升的包，不该发出任何 /install');
+    assert.strictEqual(mod.__fetchCalls.length, before, '空批次连一次请求都不该有');
   } finally {
     cleanup();
   }
@@ -1446,6 +1594,30 @@ function cssSource(file) {
 		.replace(/\\"/g, '"');
 }
 
+test("一键更新按钮的右缘要和最右那列卡片的右边框对齐", () => {
+  // 这条锁的是一个**算出来的**数，不是一个拍脑袋的数：按钮那一条在滚动区外面，
+  // 卡片在里面，两者离面板右边的距离由三段各自独立的样式相加决定 ——
+  // .dsmkBody 的横向 padding + 它 scrollbar-gutter:stable 留出的滚动条宽度
+  // + .dsmkGrid 的横向 padding。谁改了其中一个（比如把滚动条调细），按钮就会
+  // 比卡片多探出去一截，而这种几个像素的错位没人会在截图里看出来。
+  const css = cssSource(CLIENT);
+  const px = (re, what) => {
+    const m = css.match(re);
+    assert.ok(m, "读不到 " + what);
+    return Number(m[1]);
+  };
+  const bodyPad = px(/\.dsmkBody\{[^}]*padding:\s*\d+px\s+(\d+)px/, ".dsmkBody 的横向 padding");
+  const gutter = px(/\.dsmkBody::-webkit-scrollbar\{width:(\d+)px\}/, "滚动条宽度");
+  const gridPad = px(/\.dsmkGrid\{[^}]*padding:\s*\d+px\s+(\d+)px/, ".dsmkGrid 的横向 padding");
+  // 这一条的 padding 是四段写法（上 0 没有单位），跟上面两个的三段写法不同。
+  const barPadRight = px(/\.dsmkUpdateAllBar\{[^}]*padding:\s*[\d.]+(?:px)?\s+(\d+)px/, "那一条的右 padding");
+
+  assert.ok(/\.dsmkBody\{[^}]*scrollbar-gutter:stable/.test(css),
+    "前提：滚动区常驻留出滚动条位置，否则这条等式里的 gutter 项不成立");
+  assert.strictEqual(barPadRight, bodyPad + gutter + gridPad,
+    "按钮右缘和卡片右边框对不齐了：三段来源之一改过，这里要跟着重算");
+});
+
 test("侧边栏 footer 的纵向排列由本插件自带，不靠别的插件的样式兜底", () => {
   // 实机反馈：只装了市场 + 余额 + 另一个插件的机器上，三个图标挤在同一行。
   // 上游那个容器是 display:flex（默认 row、不换行），原先只有 dsh-terminal-panel
@@ -1473,7 +1645,7 @@ test("已安装插件有新版本时，侧边栏「插件市场」右上角要�
     assert.strictEqual(byClass(footer({ wide: true, t, store, updates }), "dsmkUpdDot").length, 0);
 
     await updates.refresh();
-    assert.strictEqual(updates.getSnapshot(), 2, "fixture 里有两个包能升级");
+    assert.strictEqual(updates.getSnapshot(), 3, "fixture 里有三个包能升级");
 
     // 展开态：叹号贴在**文字**的右上角（用户要的就是这个位置），所以它必须落在
     // 包着文字的那层 wrap 里——落进 .dsmkFooterBtnLabel 会被那个元素的
@@ -1534,7 +1706,7 @@ test("面板拉完 /installed 之后要顺手把角标对齐，不用等下一�
     updates.set(9);
     store.toggle();
     await mod.__render(() => panel({ t, store, updates }));
-    assert.strictEqual(updates.getSnapshot(), 2, "/installed 里有两个 updateAvailable");
+    assert.strictEqual(updates.getSnapshot(), 3, "/installed 里有三个 updateAvailable");
   } finally {
     cleanup();
   }
