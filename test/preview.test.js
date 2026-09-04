@@ -8,11 +8,14 @@
 //   1. 同一个包的并发请求合流成一次联网（imagesFor 的 in-flight 表）；
 //   2. 取不到图不算错误——回 `src: null`，卡片少一张图，别弹报错。
 import assert from "node:assert/strict";
+import { mkdtempSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import test from "node:test";
 import { pathToFileURL } from "node:url";
 import { __test__ } from "../lib/index.js";
 
-const { handlePreview, readmeCache } = __test__;
+const { handlePreview, readmeCache, saveImagesIndex } = __test__;
 
 /** profileDir 只认 baseUrl；设置文件读不到就是默认设置（官方源）。 */
 const fakeCtx = () => ({ baseUrl: pathToFileURL(process.cwd() + "/").href });
@@ -26,9 +29,9 @@ function fakeRes() {
   };
 }
 
-async function call(query) {
+async function call(query, ctx = fakeCtx()) {
   const res = fakeRes();
-  await handlePreview(fakeCtx(), { method: "GET", url: `/preview?${query}` }, res);
+  await handlePreview(ctx, { method: "GET", url: `/preview?${query}` }, res);
   return res.out;
 }
 
@@ -101,6 +104,69 @@ test("slug 形状不对就当没给（它会被拼进 raw.githubusercontent.com 
     readmeCache.clear();
     const good = await call("name=rel-pkg&slug=owner%2Frepo");
     assert.ok(good.body.data.src, "合法 slug 下这张相对路径的图应该能还原出来");
+  } finally {
+    globalThis.fetch = original;
+    readmeCache.clear();
+  }
+});
+
+test("内核重启后不该把首屏的图重问一遍——图片清单要落盘", async () => {
+  // 「每次打开面板都要加载半天」的另一半原因。缩略图是**每个可见的包**一次
+  // 416KB 的 packument，而装/卸/更新任何一个插件都要重启内核——只存内存的话，
+  // 用户装完一个插件回来，首屏二十几个包全部从头再抓一遍。
+  const dir = mkdtempSync(join(tmpdir(), "dsh-market-images-"));
+  const ctx = { baseUrl: pathToFileURL(dir + "/").href };
+  const original = globalThis.fetch;
+  readmeCache.clear();
+  let calls = 0;
+  globalThis.fetch = async () => {
+    calls += 1;
+    return { ok: true, json: async () => ({ readme: "![](https://raw.githubusercontent.com/o/r/HEAD/a.png)" }) };
+  };
+  try {
+    const first = await call("name=shot", ctx);
+    assert.equal(first.body.ok, true);
+    assert.equal(calls, 1);
+    // 正常路径上是攒 5 秒再写（scheduleImagesIndexSave），测试里不等那个定时器。
+    saveImagesIndex(ctx);
+
+    // 清掉内存缓存 = 内核重启。落盘那份还在。
+    readmeCache.clear();
+    const again = await call("name=shot", ctx);
+    assert.equal(again.body.data.src, first.body.data.src, "重启后照样给得出地址");
+    assert.equal(calls, 1, "重启不该重抓 packument——这正是「每次打开都要加载半天」的地方");
+  } finally {
+    globalThis.fetch = original;
+    readmeCache.clear();
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("缩略图地址要带上版本号——不带的话 jsDelivr 候选根本生成不出来", async () => {
+  // 真实症状：同一个包，详情页里图好好的，卡片上的缩略图却是一片空白。
+  // README 里写相对路径的图会被还原成两个候选，jsDelivr 那条需要 `<包>@<版本>`；
+  // /preview 以前把 v 留空（「不想为它多打一次 /latest」），于是那条候选被跳过，
+  // 只剩 raw.githubusercontent.com —— 国内网络多半直接超时。
+  //
+  // 版本号其实是白拿的：抓 README 的那份全量 packument 里就带着 dist-tags。
+  const original = globalThis.fetch;
+  readmeCache.clear();
+  let calls = 0;
+  globalThis.fetch = async () => {
+    calls += 1;
+    return {
+      ok: true,
+      json: async () => ({
+        "dist-tags": { latest: "2.1.0" },
+        readme: "![面板](docs/panel.png)"
+      })
+    };
+  };
+  try {
+    const out = await call("name=rel-shot&slug=" + encodeURIComponent("owner/repo"));
+    assert.equal(out.body.ok, true);
+    assert.match(out.body.data.src, /[?&]v=2\.1\.0(&|$)/, "src 里必须带 latest 版本号");
+    assert.equal(calls, 1, "版本号是顺手取的，不该为它多打一次 /latest");
   } finally {
     globalThis.fetch = original;
     readmeCache.clear();

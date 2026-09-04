@@ -1,14 +1,23 @@
 # dsh-market
 
-[DeepSeek Harness](https://github.com/deepseek-ai/deepseek-harness)（下称 dsh）的第三方插件：**插件市场**。在侧边栏提供一个面板，浏览与搜索 npm 上的 dsh 插件、看详情、装进当前 profile、管理已安装的插件。
+**插件市场：搜 npm 上的 dsh 插件，一键装进当前 profile，管理已装插件与更新。**
+**Plugin market for DeepSeek Harness: search npm, one-click install, manage plugins and updates.**
+
+[DeepSeek Harness](https://github.com/deepseek-ai/deepseek-harness)（下称 dsh）的第三方插件，在侧边栏加一个面板：浏览与搜索 npm 上的 dsh 插件、看详情、装进当前 profile、管理已经装上的那些。
+
+![插件市场面板：发现页的插件卡片、搜索与排序](docs/panel.png)
 
 > 目录里出现或显示为可安装，不代表经过安全审核或推荐。插件装上之后是以你的用户权限运行的本地代码。
+
+## 前置要求
+
+- dsh `>= 0.1.1-rc.2`
+- `pnpm` 可用（`dsh plugin` 底层转发给 pnpm）
+
 ## 安装
 
-一条命令安装：
-
 ```sh
-dsh plugin --profile <name> add @easytz/dsh-market@1.1.0
+dsh plugin --profile <name> add @easytz/dsh-market
 ```
 
 `<name>` 是**必填**的 dsh profile 名，必须替换成你实际使用的 profile，不能省略：
@@ -17,13 +26,43 @@ dsh plugin --profile <name> add @easytz/dsh-market@1.1.0
 - TUI 界面通常叫 `tui`
 - 不确定时看 `$DSH_HOME/profiles/` 下的目录名，或运行 `dsh --profile <name> --help` 确认
 
-省略 `--profile <name>` 会直接报错：`error: --profile <name> is required`，所以**不加名字不会安装成功**。
+省略 `--profile <name>` 会直接报错：`error: --profile <name> is required`，所以**不加名字不会安装成功**。想钉死版本就写 `@easytz/dsh-market@1.4.0`。
 
 安装后重启 dsh，侧边栏底部会出现「插件市场」按钮。
 
-## 卸载
+## 用法
 
-一条命令卸载：
+点侧边栏底部的**插件市场**按钮打开面板，两个页签。
+
+### 发现：找插件、装插件
+
+- **搜索框**留空就是「所有 dsh 插件」；打字按相关度过滤。默认勾着**只搜 dsh-plugin**，取消勾选就是搜整个 npm（结果里绝大多数装不进来）。
+- **排序**：周下载量 / 月下载量 / 最近更新。不管选哪种，卡片上都显示下载量和最后发版日期。排序是**先排后切、跨页连续的**，翻到第三页也不会突然冒出个更热门的包。
+- **卡片**上直接有「详情」和「安装」两个按钮 —— 想装不用先展开。点卡片本身或「详情」进详情态：截图、关键词、协议、依赖数、仓库链接，以及一条「能不能装」的明确结论。
+- **往下滚**自动加载下一页，缩略图滚到哪加载到哪。
+- **国内镜像**开关在右上角，registry.npmjs.org 连不上时打开（见下面「国内镜像」一节）。
+
+### 已安装：管插件
+
+按「你能拿它怎么办」分三组：
+
+| 分组 | 能做什么 |
+|---|---|
+| 桌面自带 | 宿主内置的产品包，卸不掉也停不了 |
+| 随应用分发但当前没装 | 一个「装回来」按钮，用宿主随包带的副本，离线可用 |
+| 从市场安装 | 停用 / 启用、卸载、有新版本时一键更新 |
+
+停用和装卸都要**重启内核后生效**，面板底部会显示「有 n 项改动，重启后生效」和一个重启按钮。
+
+### 更新角标
+
+已装插件里只要有一个能升级，侧边栏「插件市场」四个字的右上角就挂一个**蓝色小叹号**（侧边栏折叠时挂在图标上）。这个数每 30 分钟轮询一次，面板每次打开也会顺手对齐 —— 点完「更新到 x.y.z」叹号立刻就没了，不用等下一轮。查不到（离线、定位不到 profile）时保持上一次的数字，不会清零：清零等于谎报「没有更新」。
+
+### 看不到预览图？
+
+详情里会就地出现一句「预览图加载不出来 —— 你的网络可能访问不了 GitHub」和一个**启用镜像重试**按钮，点一下就写好设置并重新加载。默认不开，理由见下面「预览图」一节。
+
+## 卸载
 
 ```sh
 dsh plugin --profile <name> remove @easytz/dsh-market
@@ -33,15 +72,7 @@ dsh plugin --profile <name> remove @easytz/dsh-market
 
 > 如果你之前按旧版文档手动往 `$DSH_HOME/profiles/<name>/cordis.patch.yml` 或 `$DSH_HOME/cordis.patch.yml` 里加过 `- insert:` 条目，卸载时把那段 YAML 一起删掉。
 
-
-## 功能
-
-侧边栏底部一个按钮（`order: 110`，排在终端与 Git 之下），点开是个面板，两个页签。
-
-已安装的插件里只要有一个能升级，按钮上「插件市场」四个字的右上角就会挂一个**蓝色小叹号**（侧边栏折叠时挂在图标上）。这个数每 30 分钟轮询一次 `GET /updates`，服务端那边再缓存 10 分钟；面板每次打开都会顺手把它对齐，所以点完「更新到 x.y.z」叹号立刻就没了，不用等下一轮。查不到（离线、定位不到 profile）时保持上一次的数字，不会清零——清零等于谎报「没有更新」。
-
-- **已安装**：按「用户能拿它怎么办」分三组 —— **桌面自带**（宿主内置、卸不掉的产品包，比如 `@deepseek-ai/dsh`；本插件自己不在这一组，见下面「保护名单」）、**随应用分发但当前没装**（给「装回来」入口，用宿主随包带的副本，离线可用）、**其余全部**（可停用、可卸载，本插件自己也在这一组，只是没有停用开关）。停用与装卸都要重启内核后生效，面板里会提示。有新版本的会给一个「有更新」徽章和一键更新按钮（保护名单里的包不检查——它们本来就不能经这个市场升级）。
-- **发现**：搜 npm，方块卡片一行三个展示，可按周下载量 / 月下载量 / 最近更新排序（不管哪种排序都会显示下载量），滚到底自动加载下一页。**排序是先排后切、跨页连续的**：npm 的搜索接口不提供按下载量排，下载量得另查，所以这里先给全量索引里靠前的 1000 个包取下载量、整体排好再分页（后台填、落盘缓存，填好之前退回按页排）；「最近更新」不用额外请求，日期本来就在索引里。卡片上直接有「详情」「安装」两个按钮——点卡片本身或「详情」都进详情态（截图、关键词、协议、依赖数、仓库），「安装」不用先展开就能直接装；卡片本身也带几个去重过的关键词标签，底部一行并排显示周下载量与「更新于 …」（该包最后一次发版的日期）。README 里有截图的包，卡片上会带一张缩略图（滚进视野才去取，见 `GET /preview`）；没有图的把那块高度还给简介，多显示几行。
+## 路由一览
 
 | 路由 | 作用 |
 |---|---|
@@ -73,21 +104,29 @@ dsh plugin --profile <name> remove @easytz/dsh-market
 
 两个开关**各自独立存取，写入是合并不是整份覆盖**——只改 `imageMirror` 不会碰掉已经保存的 `registryMirror`，反过来也一样（`POST /settings/save` 只处理请求体里真的带了的字段）。
 
-## 预览图
+## 给插件作者：怎么让卡片上有图
 
-图片链接从 npm packument 里的 README 抽出来（markdown 与内嵌 HTML 两种写法都认），过滤掉 shields.io 那类徽章，相对路径按仓库还原。
+图片链接从 npm packument 里的 README 抽出来（markdown 与内嵌 HTML 两种写法都认），过滤掉 shields.io 那类徽章，相对路径按仓库还原。**README 里的第一张图就是卡片缩略图。**
+
+想让自己的插件在市场里有图，三步：
+
+1. 截图放进仓库，比如 `docs/panel.png`；
+2. README 里用**相对路径**引用：`![面板](docs/panel.png)`；
+3. `package.json` 的 `files` 里加上 `"docs"` —— **这一步最容易漏**。截图不打进 npm tarball 的话，下面第 1 条候选就是 404，只剩国内经常超时的 GitHub raw。
+
+缩略图区约 390×104（`object-fit: cover` 居中裁剪），宽幅截图效果最好。发到 npm 才生效：市场读的是 npm 上那份 packument 的 README，不是 GitHub 上的。
+
+## 预览图
 
 **图片一律经本插件代理，浏览器不直连任何第三方主机。** README 是插件作者可控的内容，直连意味着他能指挥用户的机器去访问任意地址，并借此知道「谁、什么时候、在看哪个插件」。代理这一跳把出网限制在内核进程里，主机受白名单约束、体积受上限约束，并且只放行 `content-type: image/*` 的响应。
 
 取图按候选顺序尝试：
 
-1. `cdn.jsdelivr.net/npm/<pkg>@<ver>/<path>` —— 只有截图真的打进了 npm 包（在 `files` 里）才有。实测多数插件把截图放在 `docs/`，而 `docs/` 通常不发布，所以这条经常 404。
+1. `cdn.jsdelivr.net/npm/<pkg>@<ver>/<path>` —— 只有截图真的打进了 npm 包（在 `files` 里）才有。
 2. `raw.githubusercontent.com/<owner>/<repo>/HEAD/<path>` —— 权威来源，但**在国内与不少企业网络下直接超时**。
 3. 配了 `imageMirror` 时，再试一次镜像（`<mirror>/<原始地址>`）。
 
-所以：**网络不受限时开箱就有图**。受限网络下（国内、企业网）一张都取不到时，详情里会就地出现一句「预览图加载不出来 —— 你的网络可能访问不了 GitHub」加一个「启用镜像重试」按钮，点一下就写好设置并重新加载。默认不开，因为镜像是我们不控制的第三方服务，会知道你在看哪些插件的截图 —— 这个取舍该由用户在需要时自己做，而不是我们默认替他决定。
-
-一键启用用的默认镜像是 `https://gh-proxy.com/`（实测可用）。想换别的，改 profile 里的 `dsh-market.json`。
+所以：**网络不受限时开箱就有图**。受限网络下一张都取不到时，详情里会出现「启用镜像重试」按钮。默认不开，因为镜像是我们不控制的第三方服务，会知道你在看哪些插件的截图 —— 这个取舍该由用户在需要时自己做，而不是我们默认替他决定。一键启用用的默认镜像是 `https://gh-proxy.com/`（实测可用），想换别的改 profile 里的 `dsh-market.json`。
 
 ## 国内镜像
 
@@ -117,6 +156,57 @@ dsh plugin --profile <name> remove @easytz/dsh-market
 - 所有路由过统一的 Origin + Content-Type 检查（本服务从不发 CORS 头，但那只挡读取、不挡发送）。
 - 包名在进入任何 URL 或命令行之前先过 `isValidPackageName`：小写、可带一层 scope、不以 `.` `_` `-` 开头。**禁掉 `-` 开头**是我们额外加的一条——`-g`、`--force` 整串都由合法包名字符组成，能通过 npm 自己的校验，然后被 pnpm 当作参数而不是包名吃掉。
 
-## 许可证
+---
+
+## English
+
+A third-party plugin for [DeepSeek Harness](https://github.com/deepseek-ai/deepseek-harness) (dsh): a **plugin market** in the sidebar. Browse and search dsh plugins on npm, read the details, install into the current profile, and manage what you already have.
+
+> Being listed or installable does not mean a plugin has been reviewed or endorsed. Installed plugins are local code running with your user's privileges.
+
+### Requirements
+
+- dsh `>= 0.1.1-rc.2`
+- `pnpm` available (`dsh plugin` shells out to pnpm)
+
+### Install
+
+```sh
+dsh plugin --profile <name> add @easytz/dsh-market
+```
+
+`<name>` is **required** — your dsh profile (usually `web` for the desktop/web UI, `tui` for the TUI). Omitting it fails with `error: --profile <name> is required`. Pin a version with `@easytz/dsh-market@1.4.0` if you want reproducibility.
+
+Restart dsh — a **Plugin Market** button appears at the bottom of the sidebar.
+
+### Usage
+
+Two tabs.
+
+**Discover** — leave the search box empty for every dsh plugin, or type to filter. *dsh-plugin only* is on by default; turn it off to search all of npm (most results won't be installable). Sort by weekly downloads, monthly downloads, or recently updated — downloads and the last publish date show on the card either way, and the ordering is global rather than per-page, so page three doesn't suddenly surface a more popular package. Each card carries **Details** and **Install** buttons, so you can install without expanding first; the detail view adds screenshots, keywords, license, dependency count, repository, and a plain verdict on whether the package can be installed. Scrolling loads the next page, and thumbnails load as you reach them.
+
+**Installed** — grouped by what you can do with each plugin: *bundled with the desktop app* (built-in, can't be removed or disabled), *shipped with the app but not currently installed* (one "reinstall" button, works offline from the bundled copy), and *installed from the market* (disable/enable, uninstall, one-click update when a newer version exists). Disabling and installing/uninstalling take effect after a kernel restart; the panel shows a "n pending changes" banner with a restart button.
+
+**Update badge** — a blue exclamation mark on the sidebar button when any installed plugin has a newer version. It's polled every 30 minutes and re-synced each time you open the panel, so it clears immediately after you update. If the check fails (offline, no profile), the previous count is kept rather than reset to zero — zero would be a lie.
+
+**No preview images?** The detail view offers an "enable mirror and retry" button when GitHub is unreachable from your network. See *Preview images* above for why it's off by default.
+
+### Uninstall
+
+```sh
+dsh plugin --profile <name> remove @easytz/dsh-market
+```
+
+### For plugin authors: getting a thumbnail on your card
+
+The first image in your README becomes the card thumbnail. Three steps:
+
+1. Put a screenshot in your repo, e.g. `docs/panel.png`.
+2. Reference it from the README with a **relative** path: `![Panel](docs/panel.png)`.
+3. Add `"docs"` to `files` in `package.json` — **the step people miss.** If the screenshot isn't in the published tarball, the jsDelivr candidate 404s and only GitHub raw is left, which times out on many networks.
+
+The thumbnail area is roughly 390×104 with `object-fit: cover`, so wide screenshots work best. Images are read from the README in the npm packument, so you have to publish for them to appear.
+
+## 许可证 / License
 
 [MIT](LICENSE)

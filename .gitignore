@@ -1,1 +1,5 @@
 node_modules/
+# 缓存索引：跑测试时假 ctx 的 profile 目录就是仓库根，别让它们混进版本库
+dsh-market-index.json
+dsh-market-downloads.json
+dsh-market-images.json

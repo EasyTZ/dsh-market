@@ -917,6 +917,72 @@ test('内核还是旧的 /preview 路由不存在时，缩略图要退回 /detai
   }
 });
 
+test('缩略图排队是后进先出：先服务刚滚进视野的那一屏', async () => {
+  // 用户反馈：「页面加载得非常慢」。根因不是每张图慢，是**排队顺序反了**。
+  // 一屏九张卡片、每张背后是一次 416KB 的 packument、同时只跑 3 个——先进先出之下，
+  // 往下滚三屏，眼前这一屏排在二十几个**已经滚过去**的卡片后面。人眼看到的就是
+  // 「越滚越慢，最后干脆不出图」。后进先出正好相反：最后排进来的一定是刚进视野的。
+  try {
+    const { mod } = mount();
+    const { loadPreview, previewCache } = mod.__test__;
+    previewCache.clear();
+    const started = [];
+    const held = [];
+    globalThis.fetch = async (url) => {
+      const name = decodeURIComponent(String(url).split('name=')[1].split('&')[0]);
+      started.push(name);
+      // 挂住不返回：这样才能观察到「并发满了之后，下一个被放行的是谁」。
+      await new Promise((resolve) => held.push(resolve));
+      return { ok: true, json: async () => ({ ok: true, data: { src: '/img/' + name } }) };
+    };
+    const tick = () => new Promise((resolve) => setTimeout(resolve, 0));
+    const got = {};
+    const cancels = {};
+    for (const name of ['a', 'b', 'c', 'd', 'e']) {
+      cancels[name] = loadPreview({ name, github: null }, (src) => { got[name] = src; });
+    }
+    await tick();
+    assert.deepStrictEqual(started, ['a', 'b', 'c'], '并发上限 3，多的要排队');
+
+    // d 滚出了视野（DiscoverRow 在 IntersectionObserver 里就是这么撤的）。
+    cancels.d();
+    held.shift()();  // a 完成，腾出一个名额
+    await tick();
+    assert.deepStrictEqual(started, ['a', 'b', 'c', 'e'], '腾出名额时该先跑最后排进来的 e');
+    assert.strictEqual(got.a, '/img/a');
+
+    while (held.length > 0) held.shift()();
+    await tick();
+    assert.ok(!started.includes('d'), '撤回的 d 永远不该联网——那正是被让出去的带宽');
+    assert.strictEqual(got.d, undefined);
+  } finally {
+    cleanup();
+  }
+});
+
+test('撤回只对还在排队的生效：已经在飞的那趟要跑完并进缓存', async () => {
+  // 请求都发出去了才撤，白扔掉结果等于「滚回去还得再抓一次」。
+  try {
+    const { mod } = mount();
+    const { loadPreview, previewCache } = mod.__test__;
+    previewCache.clear();
+    let release = null;
+    globalThis.fetch = async () => {
+      await new Promise((resolve) => { release = resolve; });
+      return { ok: true, json: async () => ({ ok: true, data: { src: '/img/x' } }) };
+    };
+    const tick = () => new Promise((resolve) => setTimeout(resolve, 0));
+    const cancel = loadPreview({ name: 'x', github: null }, () => {});
+    await tick();
+    cancel();
+    release();
+    await tick();
+    assert.strictEqual(previewCache.get('x'), '/img/x', '在飞的结果照样要进缓存');
+  } finally {
+    cleanup();
+  }
+});
+
 test('/preview 正常回「这个包没有图」时不能被当成路由不存在', async () => {
   // `{ok:true, data:{src:null}}` 是**答案**（README 里确实没有图），不是缺路由。
   // 分不清这两者的话，第一个没有截图的包就会把整场都拖去走更贵的 /detail。
