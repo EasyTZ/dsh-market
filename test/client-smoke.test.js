@@ -164,7 +164,9 @@ function loadModule() {
         // 的区分），这里换成真正不可卸载的宿主产品包，别再暗示市场卸不掉。
         { name: '@deepseek-ai/dsh-base', version: '0.1.0', removable: false, canDisable: false, entryIds: [], enabled: true },
         // 带一个「有更新」的，好让更新徽章/按钮、以及侧边栏那个小叹号都真的跑一遍。
-        { name: '@easytz/dsh-git', version: '0.5.0', removable: true, canDisable: true, entryIds: ['dsdesktop-git'], enabled: true, installedVersion: '0.5.0', latestVersion: '0.6.0', updateAvailable: true },
+        // description/keywords 也在这条上补齐——已安装卡片现在跟发现页一样要画
+        // 简介和标签，光靠别的行（都没有这两个字段）测不出这条路径。
+        { name: '@easytz/dsh-git', version: '0.5.0', removable: true, canDisable: true, entryIds: ['dsdesktop-git'], enabled: true, installedVersion: '0.5.0', latestVersion: '0.6.0', updateAvailable: true, description: 'Git panel for dsh', keywords: ['dsh-plugin', 'git', 'sidebar-panel'], spec: '^0.5.0' },
         // 市场自己，也带一个「有更新」——「更新市场自己」是唯一会把面板从脚下抽走的
         // 那条路（内核的 client-hmr 会把这个插件热换掉，见 client.js 里 SELF_UPDATE_KEY
         // 的注释），没有这一行就测不了它。canDisable 为 false：它在 dsDesktop 里能卸
@@ -543,7 +545,7 @@ test('已安装的插件有新版本时要给徽章和更新按钮，点了要�
     const updateBtn = updateBtnOf(tree, '@easytz/dsh-git');
     assert.ok(updateBtn, '应该有「更新到」按钮');
     // 只调这一个按钮的处理器，不用 fireAll——同样是为了不把关闭/tab 按钮也点了。
-    updateBtn.props.onClick();
+    updateBtn.props.onClick({ stopPropagation() {} });
     await new Promise((r) => setTimeout(r, 0));
     // 光断言「点了不抛」抓不住 onClick 接错回调、变成空操作这类问题——必须确认
     // 它真的把请求打到了 /install（用最新版本重装等同于更新，见后端 handleInstall）。
@@ -590,7 +592,7 @@ test('市场更新自己：面板会被内核热换掉，重启提示必须靠 s
       .find((b) => (JSON.stringify(b.props.children ?? null) ?? '').includes('market.detail.updateTo')
         && b.props.title === '@easytz/dsh-market');
     assert.ok(selfBtn, '市场自己也该有「更新到」按钮（它现在和别的插件一样能更新）');
-    selfBtn.props.onClick();
+    selfBtn.props.onClick({ stopPropagation() {} });
     await new Promise((r) => setTimeout(r, 0));
 
     // 字条要在**请求发出前**就写好：真实环境里 pnpm 写完文件到 HMR 把面板换掉，
@@ -636,7 +638,7 @@ test('更新别的插件不写那条字条：只有「市场更新自己」才�
     const btn = tree.filter((n) => n.type === 'button')
       .find((b) => (JSON.stringify(b.props.children ?? null) ?? '').includes('market.detail.updateTo')
         && b.props.title === '@easytz/dsh-git');
-    btn.props.onClick();
+    btn.props.onClick({ stopPropagation() {} });
     await new Promise((r) => setTimeout(r, 0));
     assert.strictEqual(sessionStore.getItem('dsmk:self-update'), null,
       '更新别的插件时面板不会被换掉，结果条和横幅正常显示，不需要也不该留下这条记录');
@@ -805,11 +807,11 @@ test('卸载只压暗被卸的那一张卡片：面板其余部分照常可用�
     const uninstall = async (name) => {
       const armBtn = findDanger(flatten(await mod.__render(render)), name);
       assert.ok(armBtn, name + ' 应该有卸载按钮');
-      armBtn.props.onClick();
+      armBtn.props.onClick({ stopPropagation() {} });
       const confirmBtn = findDanger(flatten(await mod.__render(render)), name);
       assert.ok(confirmBtn, '武装后按钮应该还在（换成「确认卸载？」）');
       assert.strictEqual(confirmBtn.props.disabled, false, name + ' 的卸载按钮应该点得动');
-      confirmBtn.props.onClick();
+      confirmBtn.props.onClick({ stopPropagation() {} });
       await new Promise((r) => setTimeout(r, 0));
     };
 
@@ -890,7 +892,7 @@ test('重启横幅显示的是总改动数——装/卸插件现在也计数了�
     const updateBtn = tree.filter((n) => n.type === 'button')
       .find((b) => (JSON.stringify(b.props.children ?? null) ?? '').includes('market.detail.updateTo'));
     assert.ok(updateBtn, '应该有「更新到」按钮');
-    updateBtn.props.onClick();
+    updateBtn.props.onClick({ stopPropagation() {} });
     await new Promise((r) => setTimeout(r, 0));
 
     const afterInstall = flatten(await mod.__render(render));
@@ -929,7 +931,7 @@ test('重启横幅跨 tab 都看得见——装/卸插件是在「发现」tab �
     const updateBtn = tree.filter((n) => n.type === 'button')
       .find((b) => (JSON.stringify(b.props.children ?? null) ?? '').includes('market.detail.updateTo'));
     assert.ok(updateBtn, '应该有「更新到」按钮');
-    updateBtn.props.onClick();
+    updateBtn.props.onClick({ stopPropagation() {} });
     await new Promise((r) => setTimeout(r, 0));
 
     const afterUpdate = flatten(await mod.__render(render));
@@ -1838,6 +1840,71 @@ test("外壳和内核都没有新版本时：角标不出现，两个按钮都�
     assert.strictEqual(updateBtn.props.children, "market.desktop.appUpdate.upToDate");
     assert.strictEqual(kernelBtn.props.disabled, true, "内核已是最新时按钮应禁用");
     assert.strictEqual(kernelBtn.props.children, "market.desktop.kernelUpdate.upToDate");
+  } finally {
+    cleanup();
+  }
+});
+
+test("已安装卡片要和发现页一样带简介和关键词标签，不能只有版本/声明那一行字", async () => {
+  try {
+    const { mod, captured, injected, t } = mount();
+    const panel = captured["shell.overlay:market-panel"];
+    const { store, updates } = injected["market-panel"];
+    store.toggle();
+    // 默认就是「已安装」tab，不用切。
+    const tree = flatten(await mod.__render(() => panel({ t, store, updates })));
+
+    const gitDesc = tree.find((n) => n.props && typeof n.props.className === "string"
+      && n.props.className.includes("dsmkCardDesc") && n.props.children === "Git panel for dsh");
+    assert.ok(gitDesc, "已安装卡片应该画出简介，不能因为是 installed 就不显示");
+
+    const chipsRow = tree.find((n) => n.props && n.props.className === "dsmkChips");
+    assert.ok(chipsRow, "已安装卡片应该有关键词标签行");
+    const chipTexts = flatten(chipsRow).filter((n) => n.props && n.props.className === "dsmkChip").map((n) => n.props.children);
+    assert.deepStrictEqual(chipTexts, ["git", "sidebar-panel"], "dsh-plugin 是标配词，应该被过滤掉，只留有信息量的标签");
+
+    // 版本/声明那行还在，只是降格成一行说明，不再是唯一内容。
+    assert.ok(tree.some((n) => n.props && n.props.children === "market.installed.spec"), "版本/声明那行小字应该还在");
+  } finally {
+    cleanup();
+  }
+});
+
+test("已安装卡片点了要能进详情——点卡片本身、或点「查看详情」按钮都行，且详情用的是已安装数据", async () => {
+  try {
+    const { mod, captured, injected, t } = mount();
+    const panel = captured["shell.overlay:market-panel"];
+    const { store, updates } = injected["market-panel"];
+    store.toggle();
+    const render = () => panel({ t, store, updates });
+
+    const tree = flatten(await mod.__render(render));
+    const gitNameNode = tree.find((n) => n.props && n.props.className === "dsmkCardName" && n.props.children === "@easytz/dsh-git");
+    assert.ok(gitNameNode, "已安装列表里应该有 dsh-git 这张卡片");
+    // 卡片本体是外层那个 role=button 的 div——从名字节点往回找。
+    const idx = tree.indexOf(gitNameNode);
+    let card = null;
+    for (let i = idx; i >= 0; i -= 1) {
+      if (tree[i].props && tree[i].props.role === "button" && typeof tree[i].props.onClick === "function"
+        && tree[i].props.title && tree[i].props.title.includes("@easytz/dsh-git")) { card = tree[i]; break; }
+    }
+    assert.ok(card, "已安装卡片应该是可点击的（role=button + onClick）");
+
+    card.props.onClick();
+    const detail = flatten(await mod.__render(render));
+    assert.ok(detail.some((n) => n.props && n.props.className === "dsmkDetailView"), "点卡片应该展开详情视图");
+    const head = detail.find((n) => n.props && n.props.className === "dsmkDetailHeadName");
+    assert.strictEqual(head.props.children, "@easytz/dsh-git", "详情标题应该是刚才点的那个包");
+    const desc = detail.find((n) => n.props && n.props.className === "dsmkDetailDesc");
+    assert.strictEqual(desc.props.children, "Git panel for dsh", "详情页的简介应该来自已安装数据，不是另起一套内容");
+
+    // 返回之后应该回到已安装列表（不是卡在发现页或空白）。
+    const backBtn = detail.find((n) => n.type === "button" && n.props.className === "dsmkBackBtn");
+    assert.ok(backBtn, "详情页应该有返回按钮");
+    backBtn.props.onClick();
+    const backToList = flatten(await mod.__render(render));
+    assert.ok(backToList.some((n) => n.props && n.props.className === "dsmkCardName" && n.props.children === "@easytz/dsh-git"),
+      "返回后应该看到已安装列表，dsh-git 那张卡片还在");
   } finally {
     cleanup();
   }
