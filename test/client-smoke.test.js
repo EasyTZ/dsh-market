@@ -413,7 +413,7 @@ function mount() {
   const injected = {};
   const ctx = {
     effect: () => () => {},
-    locale: { register() {} },
+    locale: { register() {}, bind: () => (k) => k },
     slots: {
       inject: (key, cb) => { cb(); return () => {}; },
       register: (opts, comp) => {
@@ -1417,7 +1417,7 @@ test('入口按钮排在 Git 与终端之下（order 升序，数字大的在后
     let opts = null;
     mod.apply({
       effect: () => () => {},
-      locale: { register() {} },
+      locale: { register() {}, bind: () => (k) => k },
       slots: {
         inject: (key, cb) => { cb(); return () => {}; },
         register: (o) => { if (o.name === 'sidebar.footer.action') opts = o; return () => {}; },
@@ -1718,7 +1718,7 @@ test("角标轮询挂在 apply 上，插件卸载时要把定时器清掉", () =
     const disposers = [];
     const ctx = {
       effect: (fn) => { const d = fn(); if (typeof d === "function") disposers.push(d); return () => {}; },
-      locale: { register() {} },
+      locale: { register() {}, bind: () => (k) => k },
       slots: { inject: (key, cb) => { cb(); return () => {}; }, register: () => () => {} },
     };
     mod.apply(ctx);
@@ -1726,6 +1726,118 @@ test("角标轮询挂在 apply 上，插件卸载时要把定时器清掉", () =
     // 轮询，几次之后就是在拿 npm registry 当靶子。
     assert.ok(disposers.length > 0, "轮询 effect 应返回一个 teardown");
     for (const dispose of disposers) dispose();
+  } finally {
+    cleanup();
+  }
+});
+
+/** 装好插件，给 window.desktop 换成一座「完整」的桥（带外壳/内核更新相关的入口）。 */
+function mountDesktopShell(desktopOverrides) {
+  const mod = loadModule();
+  globalThis.window.desktop = {
+    isDesktop: true,
+    restartApp() {},
+    getAppUpdateState: async () => ({ phase: "idle", latestVersion: null, releaseUrl: null }),
+    checkAppUpdate: async () => ({ phase: "idle", latestVersion: null, releaseUrl: null }),
+    openAppUpdate() {},
+    // 跟 checkAppUpdate 是同一种交互，只是数据源换成内核更新器（phase 之外还带
+    // currentVersion/latestVersion，这里只用得到 phase）。
+    checkKernelUpdate: async () => ({ phase: "up-to-date", currentVersion: null, latestVersion: null }),
+    openKernelUpdater() {},
+    ...desktopOverrides,
+  };
+  const captured = {};
+  const injected = {};
+  const ctx = {
+    effect: () => () => {},
+    locale: { register() {}, bind: () => (k) => k },
+    slots: {
+      inject: (key, cb) => { cb(); return () => {}; },
+      register: (opts, comp) => {
+        captured[opts.name + ":" + opts.id] = comp;
+        injected[opts.id] = opts.inject ? opts.inject() : {};
+        return () => {};
+      },
+    },
+  };
+  mod.apply(ctx);
+  return { mod, captured, injected, t: (k) => k };
+}
+
+test("外壳/内核更新的角标 / “更新”分区只在桌面端注册——网页版（没有 window.desktop.isDesktop）不该出现半成品 UI", () => {
+  try {
+    // 默认的 window.desktop 只有 restartApp（见 loadModule 里的注释），没有
+    // isDesktop 标志，模拟「别人 dsh plugin add 装进自己的 dsh」这种场景。
+    const { captured } = mount();
+    assert.strictEqual(captured["settings.action:market-desktop-update"], undefined, "非桌面端不该注册角标");
+    assert.strictEqual(captured["settings.section:market-desktop"], undefined, "非桌面端不该注册“更新”分区");
+  } finally {
+    cleanup();
+  }
+});
+
+test("外壳和内核都有新版本时：角标出现，“更新”分区两个按钮都可点且各点各的 window.desktop 入口", async () => {
+  try {
+    const calls = [];
+    const { mod, captured, injected, t } = mountDesktopShell({
+      getAppUpdateState: async () => ({ phase: "available", latestVersion: "1.8.0", releaseUrl: "https://example.com/r" }),
+      checkAppUpdate: async () => ({ phase: "available", latestVersion: "1.8.0", releaseUrl: "https://example.com/r" }),
+      openAppUpdate: () => calls.push("open-app"),
+      checkKernelUpdate: async () => ({ phase: "available", currentVersion: "0.1.1", latestVersion: "0.1.2" }),
+      openKernelUpdater: () => calls.push("open-kernel"),
+    });
+
+    const badge = captured["settings.action:market-desktop-update"];
+    const section = captured["settings.section:market-desktop"];
+    assert.ok(badge, "角标应注册进 settings.action");
+    assert.ok(section, "“更新”分区应注册进 settings.section");
+
+    const { store } = injected["market-desktop-update"];
+    // 第一轮只是把 effect（store.refresh()）跑起来；角标真正反映出「有更新」
+    // 要等这一轮的 refresh() resolve 之后，第二次渲染才读得到。
+    await mod.__render(() => badge({ t, store }));
+    const badgeTree = flatten(await mod.__render(() => badge({ t, store })));
+    const badgeBtn = badgeTree.find((n) => n.type === "button");
+    assert.ok(badgeBtn, "查到新版本后角标应该出现");
+    fireAll([badgeBtn]);
+
+    const sectionTree = flatten(await mod.__render(() => section({ t })));
+    const buttons = sectionTree.filter((n) => n.type === "button");
+    assert.strictEqual(buttons.length, 2, "“更新”分区应该正好两个按钮");
+    const [updateBtn, kernelBtn] = buttons;
+    assert.strictEqual(updateBtn.props.disabled, false, "外壳有新版本时“更新 Desktop App”按钮应可点");
+    assert.strictEqual(updateBtn.props.children, "market.desktop.appUpdate.available");
+    assert.strictEqual(kernelBtn.props.disabled, false, "内核有新版本时按钮应可点");
+    assert.strictEqual(kernelBtn.props.children, "market.desktop.kernelUpdate.available");
+
+    updateBtn.props.onClick();
+    kernelBtn.props.onClick();
+    assert.deepStrictEqual(calls, ["open-app", "open-app", "open-kernel"], "两个按钮 / 角标点击都要落到对应的 window.desktop 入口");
+  } finally {
+    cleanup();
+  }
+});
+
+test("外壳和内核都没有新版本时：角标不出现，两个按钮都显示已是最新且不可点", async () => {
+  try {
+    const { mod, captured, injected, t } = mountDesktopShell({
+      getAppUpdateState: async () => ({ phase: "up-to-date", latestVersion: "1.7.6", releaseUrl: null }),
+      checkAppUpdate: async () => ({ phase: "up-to-date", latestVersion: "1.7.6", releaseUrl: null }),
+      checkKernelUpdate: async () => ({ phase: "up-to-date", currentVersion: "0.1.2", latestVersion: "0.1.2" }),
+    });
+    const badge = captured["settings.action:market-desktop-update"];
+    const section = captured["settings.section:market-desktop"];
+    const { store } = injected["market-desktop-update"];
+    await mod.__render(() => badge({ t, store }));
+    const badgeTree = flatten(await mod.__render(() => badge({ t, store })));
+    assert.ok(!badgeTree.some((n) => n.type === "button"), "没有新版本时角标不该出现");
+
+    const sectionTree = flatten(await mod.__render(() => section({ t })));
+    const [updateBtn, kernelBtn] = sectionTree.filter((n) => n.type === "button");
+    assert.strictEqual(updateBtn.props.disabled, true, "外壳已是最新时按钮应禁用");
+    assert.strictEqual(updateBtn.props.children, "market.desktop.appUpdate.upToDate");
+    assert.strictEqual(kernelBtn.props.disabled, true, "内核已是最新时按钮应禁用");
+    assert.strictEqual(kernelBtn.props.children, "market.desktop.kernelUpdate.upToDate");
   } finally {
     cleanup();
   }
