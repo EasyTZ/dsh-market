@@ -1,11 +1,15 @@
-# dsh-market
+<h1 align="center">dsh-market</h1>
+<p align="center"><b>DeepSeek Harness 的可视化插件中心。</b></p>
+<p align="center">搜索与发现 · 查看详情 · 一键安装 · 批量更新 · 启停与卸载</p>
+<p align="center">
+  <a href="https://www.npmjs.com/package/@easytz/dsh-market"><img alt="npm" src="https://img.shields.io/npm/v/@easytz/dsh-market?style=flat-square&color=4d6bfe"></a>
+  <img alt="dsh plugin" src="https://img.shields.io/badge/dsh-plugin-17223b?style=flat-square">
+  <img alt="registry" src="https://img.shields.io/badge/source-npm-cb3837?style=flat-square&logo=npm">
+  <img alt="license" src="https://img.shields.io/badge/license-MIT-8b5cf6?style=flat-square">
+</p>
+<p align="center"><img src="docs/panel.png" alt="插件市场：发现页、搜索、排序与插件卡片" width="900"></p>
 
-**插件市场：搜 npm 上的 dsh 插件，一键装进当前 profile，管理已装插件与更新。**
-**Plugin market for DeepSeek Harness: search npm, one-click install, manage plugins and updates.**
-
-[DeepSeek Harness](https://github.com/deepseek-ai/deepseek-harness)（下称 dsh）的第三方插件，在侧边栏加一个面板：浏览与搜索 npm 上的 dsh 插件、看详情、装进当前 profile、管理已经装上的那些。
-
-![插件市场面板：发现页的插件卡片、搜索与排序](docs/panel.png)
+> Plugin market for [DeepSeek Harness](https://github.com/deepseek-ai/deepseek-harness): discover, install, update and manage profile plugins from one panel.
 
 > 目录里出现或显示为可安装，不代表经过安全审核或推荐。插件装上之后是以你的用户权限运行的本地代码。
 
@@ -29,7 +33,7 @@ dsh plugin --profile <name> add @easytz/dsh-market
 - TUI 界面通常叫 `tui`
 - 不确定时看 `$DSH_HOME/profiles/` 下的目录名，或运行 `dsh --profile <name> --help` 确认
 
-省略 `--profile <name>` 会直接报错：`error: --profile <name> is required`，所以**不加名字不会安装成功**。想钉死版本就写 `@easytz/dsh-market@1.5.0`。
+省略 `--profile <name>` 会直接报错：`error: --profile <name> is required`，所以**不加名字不会安装成功**。想钉死版本就写 `@easytz/dsh-market@1.5.1`。
 
 安装后重启 dsh，侧边栏底部会出现「插件市场」按钮。
 
@@ -191,7 +195,7 @@ A third-party plugin for [DeepSeek Harness](https://github.com/deepseek-ai/deeps
 dsh plugin --profile <name> add @easytz/dsh-market
 ```
 
-`<name>` is **required** — your dsh profile (usually `web` for the desktop/web UI, `tui` for the TUI). Omitting it fails with `error: --profile <name> is required`. Pin a version with `@easytz/dsh-market@1.5.0` if you want reproducibility.
+`<name>` is **required** — your dsh profile (usually `web` for the desktop/web UI, `tui` for the TUI). Omitting it fails with `error: --profile <name> is required`. Pin a version with `@easytz/dsh-market@1.5.1` if you want reproducibility.
 
 Restart dsh — a **Plugin Market** button appears at the bottom of the sidebar.
 

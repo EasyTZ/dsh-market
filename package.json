@@ -1,6 +1,6 @@
 {
   "name": "@easytz/dsh-market",
-  "version": "1.5.0",
+  "version": "1.5.1",
   "description": "插件市场：搜 npm 上的 dsh 插件，一键装进当前 profile，管理已装插件与更新。Plugin market for DeepSeek Harness: search npm, one-click install, manage plugins and updates.",
   "type": "module",
   "main": "lib/index.js",

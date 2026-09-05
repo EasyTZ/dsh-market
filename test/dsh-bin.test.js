@@ -8,7 +8,7 @@
 //
 // 所以这里守的是「Linux 形态也要认出来」，而不只是「能返回一个路径」。
 import assert from "node:assert/strict";
-import { mkdtempSync, mkdirSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
+import { mkdtempSync, mkdirSync, realpathSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
@@ -43,7 +43,9 @@ function withArgv1(value, fn) {
 test("Windows 形态：argv[1] 直接就是 bin.js", () => {
   const { root, binJs } = fakeDshInstall();
   try {
-    assert.equal(withArgv1(binJs, dshBinPath), binJs);
+    // macOS 的 tmpdir 通常返回 /var/...，realpath 会规范成 /private/var/...；
+    // dshBinPath 本来就承诺返回真实路径，断言也要按同一语义比较。
+    assert.equal(withArgv1(binJs, dshBinPath), realpathSync(binJs));
   } finally {
     rmSync(root, { recursive: true, force: true });
   }
